@@ -1,0 +1,111 @@
+name: Build Chess of Evil
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  # Позволяет запускать вручную из вкладки Actions
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pygame pyinstaller
+
+      - name: Build .exe with PyInstaller
+        run: |
+          pyinstaller --onefile --windowed --name "Chess_of_Evil" main.py
+
+      - name: Upload .exe as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Chess_of_Evil_Windows
+          path: dist/Chess_of_Evil.exe
+          retention-days: 30
+
+  # Опционально: собрать и Linux-версию заодно
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev \
+            libfreetype6-dev libportmidi-dev
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pygame pyinstaller
+
+      - name: Build Linux binary
+        run: |
+          pyinstaller --onefile --windowed --name "Chess_of_Evil_Linux" main.py
+
+      - name: Upload Linux binary as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Chess_of_Evil_Linux
+          path: dist/Chess_of_Evil_Linux
+          retention-days: 30
+
+  # Создаёт GitHub Release с .exe при пуше тега v*
+  release:
+    needs: [ build-windows, build-linux ]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Chess_of_Evil_Windows
+          path: release/
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Chess_of_Evil_Linux
+          path: release/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/Chess_of_Evil.exe
+            release/Chess_of_Evil_Linux
+          body: |
+            ## Шахматы Зла / Chess of Evil
+
+            ### Скачать / Download
+            - **Windows**: `Chess_of_Evil.exe` — запустить напрямую, установка не нужна
+            - **Linux**: `Chess_of_Evil_Linux` — сделать исполняемым: `chmod +x Chess_of_Evil_Linux`
+
+            ### Что нового в этой версии
+            - Полные правила Шахмат Зла
+            - Настраиваемые параметры игры
+            - Интерактивный туториал
+            - Поддержка русского и английского языков
