@@ -1994,29 +1994,33 @@ class GameScreen:
                 psize = int(sq * 0.74)
                 cx, cy = rect.centerx, rect.centery
 
-                # Shadow FIRST (before piece) — fixed ellipse at bottom of square
-                shw = max(6, sq * 55 // 100)
-                shh = max(3, sq * 7 // 100)
-                shadow_y = rect.bottom - shh - 1
-                shad = pygame.Surface((shw, shh), pygame.SRCALPHA)
-                pygame.draw.ellipse(shad, (0, 0, 0, 52), (0, 0, shw, shh))
-                surf.blit(shad, (cx - shw // 2, shadow_y))
+                # ── Soft shadow: 3 stacked ellipses, largest→smallest ──
+                # Drawn directly on board before piece
+                sw0 = sq * 60 // 100   # shadow width
+                sh0 = sq * 9  // 100   # shadow height
+                sy0 = rect.bottom - sh0 - 1
+                # outer (lightest)
+                _shad = pygame.Surface((sw0 + 8, sh0 + 6), pygame.SRCALPHA)
+                pygame.draw.ellipse(_shad, (0,0,0,22), (0, 2, sw0+8, sh0+2))
+                pygame.draw.ellipse(_shad, (0,0,0,30), (4, 1, sw0, sh0))
+                pygame.draw.ellipse(_shad, (0,0,0,44), (8, 0, sw0-8, sh0))
+                surf.blit(_shad, (cx - (sw0+8)//2, sy0))
 
-                # Piece on top
+                # ── Piece ─────────────────────────────────────────────
                 surf_p = piece_surface(p, psize)
-                pr = surf_p.get_rect(center=(cx, cy))
-                surf.blit(surf_p, pr)
+                surf.blit(surf_p, surf_p.get_rect(center=(cx, cy)))
 
         # ── Animated sliding piece (drawn on top) ────────────
         if self.anim and not self.anim.is_done():
             ax, ay = self.anim.pos()
             psize = int(sq * 0.74)
-            # Shadow slightly spread for "floating" look
-            shw = max(6, sq * 48 // 100)
-            shh = max(3, sq * 6 // 100)
-            shad = pygame.Surface((shw, shh), pygame.SRCALPHA)
-            pygame.draw.ellipse(shad, (0, 0, 0, 38), (0, 0, shw, shh))
-            surf.blit(shad, (int(ax) - shw // 2, int(ay) + psize // 2 - shh + 2))
+            # Shadow below animated (floating) piece
+            sw0 = sq * 52 // 100; sh0 = sq * 7 // 100
+            sy0 = int(ay) + psize // 2 - sh0
+            _shad = pygame.Surface((sw0 + 6, sh0 + 4), pygame.SRCALPHA)
+            pygame.draw.ellipse(_shad, (0,0,0,18), (0, 1, sw0+6, sh0+2))
+            pygame.draw.ellipse(_shad, (0,0,0,28), (3, 0, sw0, sh0))
+            surf.blit(_shad, (int(ax) - (sw0+6)//2, sy0))
             surf_p = piece_surface(self.anim.piece, psize)
             surf.blit(surf_p, surf_p.get_rect(center=(int(ax), int(ay) - 3)))
     def _draw_sidebar(self, surf):
@@ -2391,9 +2395,10 @@ class UpdateChecker:
     def __init__(self):
         self.latest_version: str | None = None
         self.release_url: str = ""
-        self.asset_url: str = ""         # direct download URL for main.py or .exe
+        self.asset_url: str = ""
         self.checked = False
         self.checking = False
+        self.check_error: str = ""
         self.downloading = False
         self.download_progress = 0.0     # 0.0 → 1.0
         self.download_error: str = ""
@@ -2411,12 +2416,14 @@ class UpdateChecker:
     def _check(self):
         try:
             api = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-            req = _urllib_req.Request(api, headers={"User-Agent": "ChessOfEvil"})
-            with _urllib_req.urlopen(req, timeout=6) as resp:
+            req = _urllib_req.Request(api, headers={"User-Agent": "ChessOfEvil/1.0"})
+            with _urllib_req.urlopen(req, timeout=8) as resp:
                 data = _json.loads(resp.read())
-                self.latest_version = data.get("tag_name", "").lstrip("v")
+                tag = data.get("tag_name", "")
+                self.latest_version = tag.lstrip("v").strip()
                 self.release_url = data.get("html_url", "")
-                # Look for main.py asset first, then .exe
+                self.check_error = ""
+                # Look for main.py asset first, then .exe, then _Linux
                 for asset in data.get("assets", []):
                     name = asset.get("name", "")
                     if name == "main.py":
@@ -2425,11 +2432,18 @@ class UpdateChecker:
                 if not self.asset_url:
                     for asset in data.get("assets", []):
                         name = asset.get("name", "")
-                        if name.endswith(".exe") or name.endswith("_Linux"):
+                        if name.endswith(".exe"):
+                            self.asset_url = asset.get("browser_download_url", "")
+                            break
+                if not self.asset_url:
+                    for asset in data.get("assets", []):
+                        name = asset.get("name", "")
+                        if "_Linux" in name:
                             self.asset_url = asset.get("browser_download_url", "")
                             break
         except Exception as e:
             self.latest_version = None
+            self.check_error = str(e)
         finally:
             self.checked = True
             self.checking = False
@@ -2682,7 +2696,7 @@ class ModeScreen:
         self._btn_update = None  # reset each frame
 
         if _updater.download_error:
-            err_short = _updater.download_error[:60]
+            err_short = _updater.download_error[:70]
             draw_text(surf, f"✗ {err_short}", FONTS["xs"], C["red2"], cx, ver_y + 8, "midtop")
 
         elif _updater.ready_to_restart:
@@ -2698,14 +2712,17 @@ class ModeScreen:
             pct = int(prog * 100)
             lbl = f"⬇  {'Скачивание' if LANG=='ru' else 'Downloading'} {pct}%..."
             draw_text(surf, lbl, FONTS["sm"], C["text2"], cx, ver_y + 2, "midtop")
-            # Progress bar
-            bar_w2 = 260; bar_h2 = 6
+            bar_w2 = 260
             bx2 = cx - bar_w2 // 2
-            pygame.draw.rect(surf, C["bg3"], (bx2, ver_y + 22, bar_w2, bar_h2), border_radius=3)
-            pygame.draw.rect(surf, C["accent"], (bx2, ver_y + 22, int(bar_w2 * prog), bar_h2), border_radius=3)
+            pygame.draw.rect(surf, C["bg3"], (bx2, ver_y + 22, bar_w2, 6), border_radius=3)
+            pygame.draw.rect(surf, C["accent"], (bx2, ver_y + 22, int(bar_w2 * prog), 6), border_radius=3)
 
         elif _updater.update_available():
-            lbl = f"⬆  {'Доступна' if LANG=='ru' else 'Update'} v{_updater.latest_version} — {'обновить' if LANG=='ru' else 'update'}"
+            has_direct = bool(_updater.asset_url)
+            if has_direct:
+                lbl = f"⬆  {'Доступна' if LANG=='ru' else 'Update'} v{_updater.latest_version} — {'скачать и обновить' if LANG=='ru' else 'download & update'}"
+            else:
+                lbl = f"⬆  {'Доступна' if LANG=='ru' else 'Update'} v{_updater.latest_version} — {'открыть страницу' if LANG=='ru' else 'open page'}"
             bw2 = FONTS["sm"].size(lbl)[0] + 28
             btn_u = pygame.Rect(cx - bw2 // 2, ver_y, bw2, 30)
             draw_rect(surf, (35, 70, 35), btn_u, 6, 1, (70, 150, 70))
@@ -2716,8 +2733,12 @@ class ModeScreen:
             draw_text(surf, "Проверка обновлений..." if LANG=="ru" else "Checking for updates...",
                       FONTS["xs"], C["text3"], cx, ver_y + 8, "midtop")
         elif _updater.checked:
-            draw_text(surf, "✓ Актуальная версия" if LANG=="ru" else "✓ Up to date",
-                      FONTS["xs"], C["text3"], cx, ver_y + 8, "midtop")
+            if _updater.check_error:
+                draw_text(surf, f"⚠ Нет связи" if LANG=="ru" else "⚠ No connection",
+                          FONTS["xs"], C["text3"], cx, ver_y + 8, "midtop")
+            else:
+                draw_text(surf, f"✓ Актуальная версия (v{CURRENT_VERSION})" if LANG=="ru" else f"✓ Up to date (v{CURRENT_VERSION})",
+                          FONTS["xs"], C["text3"], cx, ver_y + 8, "midtop")
 
     def handle(self, event):
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -2725,9 +2746,13 @@ class ModeScreen:
             # Update button — behaviour depends on state
             if hasattr(self, "_btn_update") and self._btn_update and self._btn_update.collidepoint(pos):
                 if _updater.ready_to_restart:
-                    _updater.apply_and_restart()   # replace file + restart
-                elif _updater.update_available() and not _updater.downloading:
-                    _updater.start_download()      # begin background download
+                    _updater.apply_and_restart()
+                elif _updater.update_available():
+                    if _updater.asset_url and not _updater.downloading:
+                        _updater.start_download()
+                    elif _updater.release_url:
+                        import webbrowser
+                        webbrowser.open(_updater.release_url)
             # Local play
             if hasattr(self, "_btn_local") and self._btn_local.collidepoint(pos):
                 self.result = {"mode": "local"}
