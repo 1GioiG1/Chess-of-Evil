@@ -5,7 +5,6 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
-  # Позволяет запускать вручную из вкладки Actions
   workflow_dispatch:
 
 jobs:
@@ -27,7 +26,7 @@ jobs:
 
       - name: Build .exe with PyInstaller
         run: |
-          pyinstaller --onefile --windowed --name "Chess_of_Evil" main.py
+          pyinstaller --onefile --windowed --name "Chess_of_Evil" --add-data "assets;assets" main.py
 
       - name: Upload .exe as artifact
         uses: actions/upload-artifact@v4
@@ -36,7 +35,6 @@ jobs:
           path: dist/Chess_of_Evil.exe
           retention-days: 30
 
-  # Опционально: собрать и Linux-версию заодно
   build-linux:
     runs-on: ubuntu-latest
     steps:
@@ -62,16 +60,15 @@ jobs:
 
       - name: Build Linux binary
         run: |
-          pyinstaller --onefile --windowed --name "Chess_of_Evil_Linux" main.py
+          pyinstaller --onefile --windowed --name "Chess_of_Evil_Linux" --add-data "assets:assets" main.py
 
-      - name: Upload Linux binary as artifact
+      - name: Upload Linux binary
         uses: actions/upload-artifact@v4
         with:
           name: Chess_of_Evil_Linux
           path: dist/Chess_of_Evil_Linux
           retention-days: 30
 
-  # Создаёт GitHub Release с .exe при пуше тега v*
   release:
     needs: [ build-windows, build-linux ]
     runs-on: ubuntu-latest
@@ -101,11 +98,5 @@ jobs:
             ## Шахматы Зла / Chess of Evil
 
             ### Скачать / Download
-            - **Windows**: `Chess_of_Evil.exe` — запустить напрямую, установка не нужна
-            - **Linux**: `Chess_of_Evil_Linux` — сделать исполняемым: `chmod +x Chess_of_Evil_Linux`
-
-            ### Что нового в этой версии
-            - Полные правила Шахмат Зла
-            - Настраиваемые параметры игры
-            - Интерактивный туториал
-            - Поддержка русского и английского языков
+            - **Windows**: `Chess_of_Evil.exe`
+            - **Linux**: `Chess_of_Evil_Linux`
