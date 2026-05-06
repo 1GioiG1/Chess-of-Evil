@@ -510,10 +510,11 @@ class GameState:
 
     def end_turn(self):
         if not self.rolled or self.over: return
+        # Reset CURRENT player's AP before switching
+        self.od[self.turn] = 0
         self.turn = opp(self.turn)
         self.rolled = False; self.act_used = 0; self.moved_pieces = {}
         self.crit = False; self.crit_key = None; self.crit_used = False
-        self.od[self.turn] = 0
         self.sel = None; self.legal = []; self.check_sq = None
         self.add_log(T("log_turn", T("white") if self.turn=="W" else T("black")), "sys")
 
@@ -749,11 +750,14 @@ def draw_board_frame(surf, bx, by, bsize, sq):
         draw_text(surf, lbl, font, (180, 140, 90), bx + bsize + 3, ry, "midleft")
 
 
-def draw_piece_shadow(surf, cx, cy, radius):
-    """Draw a soft oval shadow under a piece."""
-    shad = pygame.Surface((radius * 2, radius), pygame.SRCALPHA)
-    pygame.draw.ellipse(shad, (0, 0, 0, 60), (0, 0, radius * 2, radius))
-    surf.blit(shad, (cx - radius, cy - radius // 2))
+def draw_piece_shadow(surf, cx, cy, psize):
+    """Draw a soft oval shadow centred under a piece."""
+    sw = int(psize * 0.7)
+    sh = int(psize * 0.18)
+    if sw < 4 or sh < 2: return
+    shad = pygame.Surface((sw, sh), pygame.SRCALPHA)
+    pygame.draw.ellipse(shad, (0, 0, 0, 55), (0, 0, sw, sh))
+    surf.blit(shad, (cx - sw // 2, cy - sh // 2))
 
 
 class Button:
@@ -883,21 +887,25 @@ DIE_DOTS = {
 def draw_die(surf, val, rect, crit=False, fail=False, player_color=None):
     if crit:
         bg = C["die_crit"]; border = (80,180,80)
+        dot_color = (220,255,200)
     elif fail:
         bg = C["die_fail"]; border = (200,80,80)
+        dot_color = (255,200,180)
     elif player_color == "W":
-        bg = (55, 55, 70); border = (200, 200, 220)
+        # Clearly white die: ivory background, dark dots
+        bg = (240, 235, 218); border = (180, 160, 120)
+        dot_color = (40, 30, 20)
     elif player_color == "B":
-        bg = (25, 25, 35); border = (80, 80, 100)
+        # Clearly black die: very dark background, light dots
+        bg = (22, 18, 30); border = (130, 100, 180)
+        dot_color = (220, 210, 240)
     else:
         bg = C["die_bg"]; border = C["border2"]
+        dot_color = C["text"]
     draw_rect(surf, bg, rect, 8, 2, border)
     if val < 1 or val > 6:
         draw_text(surf, "?", FONTS["med"], C["text2"], rect.centerx, rect.centery, "center")
         return
-    dot_color = (220,240,200) if crit else (240,180,180) if fail else \
-                (240,240,250) if player_color == "W" else \
-                (180,180,200) if player_color == "B" else C["text"]
     dot_r = max(3, rect.width // 10)
 
     # Inner shadow on top-left
@@ -1083,7 +1091,7 @@ class SettingsScreen:
         if self._flash:
             which, t0 = self._flash
             elapsed = _time.monotonic() - t0
-            FLASH_DUR = 0.55
+            FLASH_DUR = 1.5
             if elapsed < FLASH_DUR:
                 prog = elapsed / FLASH_DUR
                 # Alpha: spike up then fade
@@ -1290,47 +1298,223 @@ class TutorialScreen:
         self.btn_prev = Button((0,0,160,40), T("learn_prev"))
         self.btn_exit = Button((0,0,140,40), T("learn_exit"))
 
+    # ── Mini board illustration helpers ──────────────────────
+    def _draw_mini_board(self, surf, x, y, size, pieces, highlights=None, arrows=None):
+        """Draw a small chess diagram. pieces = {(r,c): piece_char}"""
+        sq = size // 8
+        bsize = sq * 8
+        for r in range(8):
+            for c in range(8):
+                light = (r + c) % 2 == 0
+                rect = pygame.Rect(x + c * sq, y + r * sq, sq, sq)
+                col = (240, 217, 181) if light else (181, 136, 99)
+                pygame.draw.rect(surf, col, rect)
+                if highlights and (r, c) in highlights:
+                    rgba = highlights[(r, c)]
+                    hl = pygame.Surface((sq, sq), pygame.SRCALPHA)
+                    if len(rgba) == 4:
+                        hl.fill(rgba)
+                    else:
+                        hl.fill((*rgba, 140))
+                    surf.blit(hl, rect.topleft)
+        # Border
+        pygame.draw.rect(surf, (80, 55, 30), (x - 2, y - 2, bsize + 4, bsize + 4), 2, border_radius=3)
+        # Pieces
+        for (r, c), p in pieces.items():
+            rect = pygame.Rect(x + c * sq, y + r * sq, sq, sq)
+            psize = int(sq * 0.72)
+            ps = piece_surface(p, psize)
+            surf.blit(ps, ps.get_rect(center=rect.center))
+        # Arrows
+        if arrows:
+            for (r1,c1), (r2,c2) in arrows:
+                ax1 = x + c1 * sq + sq // 2
+                ay1 = y + r1 * sq + sq // 2
+                ax2 = x + c2 * sq + sq // 2
+                ay2 = y + r2 * sq + sq // 2
+                pygame.draw.line(surf, (255, 200, 0), (ax1, ay1), (ax2, ay2), 3)
+                # Arrowhead
+                dx, dy = ax2 - ax1, ay2 - ay1
+                length = max(1, (dx**2 + dy**2) ** 0.5)
+                ux, uy = dx / length, dy / length
+                px, py = -uy, ux
+                tip = (ax2, ay2)
+                left = (int(ax2 - ux*10 + px*5), int(ay2 - uy*10 + py*5))
+                right = (int(ax2 - ux*10 - px*5), int(ay2 - uy*10 - py*5))
+                pygame.draw.polygon(surf, (255, 200, 0), [tip, left, right])
+
+    def _draw_dice_example(self, surf, x, y, d1, d2, label, player_color=None):
+        """Draw two dice with a label below."""
+        die_sz = 44; gap = 10
+        r1 = pygame.Rect(x, y, die_sz, die_sz)
+        r2 = pygame.Rect(x + die_sz + gap, y, die_sz, die_sz)
+        draw_die(surf, d1, r1, player_color=player_color)
+        draw_die(surf, d2, r2, player_color=player_color)
+        draw_text(surf, label, FONTS["xs"], C["text2"],
+                  x + die_sz + gap // 2, y + die_sz + 6, "midtop")
+
+    def _get_illustration(self, step_idx, area):
+        """Return a Surface with the illustration for this step."""
+        w, h = area.width, area.height
+        surf = pygame.Surface((w, h), pygame.SRCALPHA)
+        surf.fill((0, 0, 0, 0))
+        cx, cy = w // 2, h // 2
+
+        mini_sz = min(w - 20, h - 20, 240)
+        mini_sz = (mini_sz // 8) * 8
+        mx = cx - mini_sz // 2
+        my = cy - mini_sz // 2
+
+        if step_idx == 0:  # Welcome - full starting position overview
+            pieces = {}
+            for c, p in enumerate("RNBQKBNR"):
+                pieces[(0, c)] = p.lower(); pieces[(7, c)] = p
+            for c in range(8):
+                pieces[(1, c)] = "p"; pieces[(6, c)] = "P"
+            self._draw_mini_board(surf, mx, my, mini_sz, pieces)
+
+        elif step_idx == 1:  # Piece costs - show piece values
+            sq = mini_sz // 8
+            pieces_row = [("K","8"),("Q","6"),("R","5"),("B","3"),("N","3"),("P","1")]
+            col_w = min(w // 6, 70)
+            start_x = cx - len(pieces_row) * col_w // 2
+            for i, (pt, cost) in enumerate(pieces_row):
+                px2 = start_x + i * col_w + col_w // 2
+                py2 = cy - 20
+                ps = piece_surface(pt, 36)
+                surf.blit(ps, ps.get_rect(center=(px2, py2)))
+                draw_text(surf, cost + " ОД" if LANG == "ru" else cost + " AP",
+                          FONTS["xs"], C["gold2"], px2, py2 + 26, "midtop")
+
+        elif step_idx == 2:  # Turn limits - show board with arrows
+            pieces = {(6,4):"P", (4,4):"P"}
+            hl = {(5,4):(90,180,90,140), (4,4):(90,130,220,160)}
+            self._draw_mini_board(surf, mx, my, mini_sz, pieces, hl,
+                                  [((6,4),(4,4))])
+
+        elif step_idx == 3:  # Critical rolls
+            self._draw_dice_example(surf, cx - 55, cy - 40, 6, 6, "= 12 ★ КРИТ" if LANG=="ru" else "= 12 ★ CRIT", "W")
+            self._draw_dice_example(surf, cx - 55, cy + 30, 1, 1, "= 2  ✗ ПРОВАЛ" if LANG=="ru" else "= 2  ✗ FAIL", "B")
+
+        elif step_idx == 4:  # Check
+            pieces = {(3,4):"K", (0,4):"q", (4,3):"r"}
+            hl = {(3,4):(220,60,60,180)}
+            self._draw_mini_board(surf, mx, my, mini_sz, pieces, hl)
+
+        elif step_idx == 5:  # Royal Gambit
+            pieces = {(4,4):"K"}
+            hl = {(3,3):(90,180,90,140),(3,4):(90,180,90,140),(3,5):(90,180,90,140),
+                  (4,3):(90,180,90,140),(4,5):(90,180,90,140),
+                  (5,3):(90,180,90,140),(5,4):(90,180,90,140),(5,5):(90,180,90,140)}
+            self._draw_mini_board(surf, mx, my, mini_sz, pieces, hl)
+            draw_text(surf, "1 ОД" if LANG=="ru" else "1 AP",
+                      FONTS["sm"], C["gold2"], cx, my + mini_sz + 8, "midtop")
+
+        elif step_idx == 6:  # Clash of Fates
+            pieces = {(3,3):"K", (5,5):"k"}
+            self._draw_mini_board(surf, mx, my, mini_sz, pieces)
+            # Show resurrectable pieces
+            res_pieces = ["Q","R","B","N"]
+            icon_w = min(w // 5, 50)
+            iy = my + mini_sz + 14
+            for i, pt in enumerate(res_pieces):
+                ipx = cx - len(res_pieces)*icon_w//2 + i*icon_w + icon_w//2
+                ps = piece_surface(pt, 28)
+                surf.blit(ps, ps.get_rect(center=(ipx, iy + 14)))
+                draw_text(surf, "+", FONTS["sm"], C["accent"], ipx, iy - 2, "midtop")
+
+        elif step_idx == 7:  # Castling / En passant
+            sq2 = mini_sz // 8
+            # Castling side (left)
+            p_c = {(7,4):"K",(7,7):"R"}
+            hl_c = {(7,6):(210,175,50,160),(7,5):(210,175,50,100)}
+            self._draw_mini_board(surf, mx - mini_sz//2 - 10, my, mini_sz, p_c, hl_c)
+            draw_text(surf, "0-0", FONTS["sm"], C["gold2"],
+                      mx - mini_sz//2 - 10 + mini_sz//2, my + mini_sz + 6, "midtop")
+            # EP side (right)
+            p_ep = {(3,4):"p",(3,3):"P"}
+            hl_ep = {(2,3):(60,200,220,160)}
+            self._draw_mini_board(surf, mx + mini_sz//2 + 10, my, mini_sz, p_ep, hl_ep,
+                                  [((3,3),(2,3))])
+            draw_text(surf, "e.p.", FONTS["sm"], C["accent"],
+                      mx + mini_sz//2 + 10 + mini_sz//2, my + mini_sz + 6, "midtop")
+
+        else:  # End of game
+            pieces = {(0,4):"k", (2,3):"Q", (1,2):"R"}
+            self._draw_mini_board(surf, mx, my, mini_sz, pieces,
+                                  {(0,4):(220,60,60,200)})
+            draw_text(surf, "MAT" if LANG=="en" else "МАТ",
+                      FONTS["big"], C["red2"], cx, my + mini_sz + 8, "midtop")
+
+        return surf
+
     def draw(self, surf):
         sw, sh = surf.get_width(), surf.get_height()
         surf.fill(C["bg"])
+
+        # Gradient background
+        for yy in range(0, sh, 4):
+            t = yy / sh
+            col = (int(18+t*5), int(18+t*3), int(24+t*9))
+            pygame.draw.line(surf, col, (0, yy), (sw, yy))
+
         steps = get_tutorial_steps()
         total = len(steps)
         self.step = max(0, min(self.step, total - 1))
         title, body = steps[self.step]
 
-        bar_x, bar_y = 60, 50
-        bar_w = sw - 120
-        pygame.draw.rect(surf, C["bg3"], (bar_x, bar_y, bar_w, 6), border_radius=3)
+        # Progress bar
+        bar_x, bar_y = 50, 40
+        bar_w = sw - 100
+        pygame.draw.rect(surf, C["bg3"], (bar_x, bar_y, bar_w, 5), border_radius=3)
         prog = int(bar_w * (self.step + 1) / total)
-        pygame.draw.rect(surf, C["accent"], (bar_x, bar_y, prog, 6), border_radius=3)
-        draw_text(surf, f"{self.step+1} / {total}", FONTS["sm"], C["text3"],
-                  sw // 2, bar_y - 18, "center")
+        pygame.draw.rect(surf, C["accent"], (bar_x, bar_y, prog, 5), border_radius=3)
+        # Step dots
+        dot_gap = bar_w // total
+        for i in range(total):
+            dx = bar_x + i * dot_gap + dot_gap // 2
+            col = C["accent"] if i <= self.step else C["bg3"]
+            pygame.draw.circle(surf, col, (dx, bar_y + 2), 5 if i == self.step else 3)
+        draw_text(surf, f"{self.step+1} / {total}", FONTS["xs"], C["text3"],
+                  sw - bar_x, bar_y + 2, "midright")
 
-        card_x = 60; card_y = 80
-        card_w = sw - 120; card_h = sh - 180
-        draw_rect(surf, C["panel"], (card_x, card_y, card_w, card_h), 12, 1, C["border"])
+        # Layout: left side = text, right side = illustration
+        content_y = bar_y + 22
+        content_h = sh - content_y - 70
+        split = int(sw * 0.52)
 
+        # Left card (text)
+        card_pad = 14
+        draw_rect(surf, C["panel"], (50, content_y, split - 60, content_h), 12, 1, C["border"])
         draw_text(surf, title, FONTS["big"], C["gold2"],
-                  sw // 2, card_y + 28, "midtop")
+                  50 + card_pad, content_y + 18)
         pygame.draw.line(surf, C["border"],
-                         (card_x + 30, card_y + 70),
-                         (card_x + card_w - 30, card_y + 70), 1)
-
-        text_x = card_x + 40
-        text_y = card_y + 90
-        max_w = card_w - 80
-        lines = wrap_text(body, FONTS["med"], max_w)
+                         (50 + card_pad, content_y + 50),
+                         (split - 60 - card_pad, content_y + 50), 1)
+        text_x = 50 + card_pad
+        text_y = content_y + 60
+        max_tw = split - 60 - card_pad * 2
+        lines = wrap_text(body, FONTS["med"], max_tw)
+        lh = FONTS["med"].get_height() + 6
         for i, line in enumerate(lines):
-            ly = text_y + i * (FONTS["med"].get_height() + 5)
-            if ly > card_y + card_h - 30: break
+            ly = text_y + i * lh
+            if ly + lh > content_y + content_h - 10: break
             draw_text(surf, line, FONTS["med"], C["text"], text_x, ly)
 
-        bw = 160; gap = 16
-        ty = sh - 60
-        cx = sw // 2
-        self.btn_prev.rect = pygame.Rect(cx - bw - gap // 2, ty, bw, 40)
-        self.btn_next.rect = pygame.Rect(cx + gap // 2, ty, bw, 40)
-        self.btn_exit.rect = pygame.Rect(sw - 160, ty, 140, 40)
+        # Right panel (illustration)
+        illus_x = split - 10
+        illus_w = sw - illus_x - 50
+        illus_area = pygame.Rect(illus_x, content_y, illus_w, content_h)
+        draw_rect(surf, C["panel2"], illus_area, 12, 1, C["border2"])
+        illus_surf = self._get_illustration(self.step, illus_area)
+        surf.blit(illus_surf, illus_area.topleft)
+
+        # Navigation buttons
+        btn_y = sh - 56
+        bw = 160; gap = 16; cx2 = sw // 2
+        self.btn_prev.rect = pygame.Rect(cx2 - bw - gap // 2, btn_y, bw, 40)
+        self.btn_next.rect = pygame.Rect(cx2 + gap // 2, btn_y, bw, 40)
+        self.btn_exit.rect = pygame.Rect(sw - 160, btn_y, 140, 40)
 
         self.btn_prev.disabled = self.step == 0
         self.btn_next.label = T("learn_next") if self.step < total - 1 else T("learn_exit")
@@ -1356,8 +1540,6 @@ class TutorialScreen:
         self.btn_next.label = T("learn_next")
         self.btn_prev.label = T("learn_prev")
         self.btn_exit.label = T("learn_exit")
-
-
 class GameScreen:
     def __init__(self):
         self.gs = GameState()
@@ -1551,11 +1733,11 @@ class GameScreen:
 
                 rect = pygame.Rect(bx + c * sq, by + r * sq, sq, sq)
                 psize = int(sq * 0.74)
-                cx, cy = rect.centerx, rect.centery + 2
+                cx, cy = rect.centerx, rect.centery
 
-                # Shadow
-                shad_r = max(4, psize // 4)
-                draw_piece_shadow(surf, cx, cy + psize // 3, shad_r * 2)
+                # Shadow - drawn at bottom edge of piece
+                shadow_cy = rect.bottom - int(psize * 0.08)
+                draw_piece_shadow(surf, cx, shadow_cy, psize)
 
                 # Piece
                 surf_p = piece_surface(p, psize)
@@ -1566,9 +1748,11 @@ class GameScreen:
         if self.anim and not self.anim.is_done():
             ax, ay = self.anim.pos()
             psize = int(sq * 0.74)
-            draw_piece_shadow(surf, int(ax), int(ay) + psize // 3, psize // 2)
+            # Shadow slightly below centre for lifted piece effect
+            draw_piece_shadow(surf, int(ax), int(ay) + psize // 2, psize)
             surf_p = piece_surface(self.anim.piece, psize)
-            pr = surf_p.get_rect(center=(int(ax), int(ay)))
+            pr = surf_p.get_rect(center=(int(ax), int(ay) - 4))
+
             surf.blit(surf_p, pr)
     def _draw_sidebar(self, surf):
         gs = self.gs
