@@ -234,7 +234,11 @@ def raw_moves(board, r, c, ep, castling, skip_castle=False):
             if tgt and pc(tgt) == enemy:
                 moves.append((nr, nc, None))
             elif ep and ep == (nr, nc) and settings.get("allow_ep", True):
-                moves.append((nr, nc, "ep"))
+                # Verify the pawn that passed is actually an enemy pawn on the adjacent square
+                ep_pawn_r = r  # the enemy pawn is on the same row as us, adjacent column
+                ep_pawn = board[ep_pawn_r][nc]
+                if ep_pawn and tp(ep_pawn) == "P" and pc(ep_pawn) == enemy:
+                    moves.append((nr, nc, "ep"))
 
     if t == "N":
         for dr,dc in [(-2,-1),(-2,1),(-1,-2),(-1,2),(1,-2),(1,2),(2,-1),(2,1)]:
@@ -672,6 +676,86 @@ def clear_piece_cache():
     _symbol_font_cache.clear()
 
 
+# ─────────────────────────────────────────
+#  ANIMATION SYSTEM
+# ─────────────────────────────────────────
+import time as _time
+
+class PieceAnim:
+    """Sliding piece animation from src to dst pixel coords."""
+    DURATION = 0.18   # seconds
+
+    def __init__(self, piece, sx, sy, ex, ey):
+        self.piece = piece
+        self.sx, self.sy = sx, sy
+        self.ex, self.ey = ex, ey
+        self.t0 = _time.monotonic()
+        self.done = False
+
+    def progress(self):
+        t = (_time.monotonic() - self.t0) / self.DURATION
+        t = min(1.0, t)
+        # ease-out cubic
+        t = 1 - (1 - t) ** 3
+        return t
+
+    def pos(self):
+        p = self.progress()
+        return (self.sx + (self.ex - self.sx) * p,
+                self.sy + (self.ey - self.sy) * p)
+
+    def is_done(self):
+        return _time.monotonic() - self.t0 >= self.DURATION
+
+
+def _ease_pulse(period=1.2):
+    """0→1→0 sine pulse for selection glow."""
+    t = _time.monotonic()
+    return (math.sin(t * 2 * math.pi / period) + 1) / 2
+
+
+import math
+
+def draw_sq_highlight(surf, rect, color, alpha=160, radius=4):
+    """Draw a coloured semi-transparent highlight over a square."""
+    hl = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+    hl.fill((*color, alpha))
+    surf.blit(hl, rect.topleft)
+
+
+def draw_board_frame(surf, bx, by, bsize, sq):
+    """Draw decorative wooden-style border around the board."""
+    frame = 14
+    fr = pygame.Rect(bx - frame, by - frame, bsize + frame * 2, bsize + frame * 2)
+    # Outer shadow
+    shad = pygame.Surface((fr.width + 8, fr.height + 8), pygame.SRCALPHA)
+    pygame.draw.rect(shad, (0, 0, 0, 90), (0, 0, fr.width + 8, fr.height + 8), border_radius=10)
+    surf.blit(shad, (fr.x - 2, fr.y + 4))
+    # Frame body – dark wood colour
+    pygame.draw.rect(surf, (55, 38, 22), fr, border_radius=8)
+    # Inner highlight stripe
+    pygame.draw.rect(surf, (80, 55, 30), fr, 2, border_radius=8)
+    # Coord labels inside frame
+    font = FONTS["coord"]
+    for c in range(8):
+        lbl = f2l(c)
+        cx = bx + c * sq + sq // 2
+        draw_text(surf, lbl, font, (180, 140, 90), cx, by + bsize + 3, "midtop")
+        draw_text(surf, lbl, font, (180, 140, 90), cx, by - frame + 1, "midtop")
+    for r in range(8):
+        lbl = str(8 - r)
+        ry = by + r * sq + sq // 2
+        draw_text(surf, lbl, font, (180, 140, 90), bx - frame + 2, ry, "midleft")
+        draw_text(surf, lbl, font, (180, 140, 90), bx + bsize + 3, ry, "midleft")
+
+
+def draw_piece_shadow(surf, cx, cy, radius):
+    """Draw a soft oval shadow under a piece."""
+    shad = pygame.Surface((radius * 2, radius), pygame.SRCALPHA)
+    pygame.draw.ellipse(shad, (0, 0, 0, 60), (0, 0, radius * 2, radius))
+    surf.blit(shad, (cx - radius, cy - radius // 2))
+
+
 class Button:
     def __init__(self, rect, label, font=None, color=None, hover_color=None,
                  text_color=None, disabled_color=None, radius=8):
@@ -814,11 +898,22 @@ def draw_die(surf, val, rect, crit=False, fail=False, player_color=None):
     dot_color = (220,240,200) if crit else (240,180,180) if fail else \
                 (240,240,250) if player_color == "W" else \
                 (180,180,200) if player_color == "B" else C["text"]
-    r = max(3, rect.width // 10)
+    dot_r = max(3, rect.width // 10)
+
+    # Inner shadow on top-left
+    hl_surf = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+    pygame.draw.rect(hl_surf, (255,255,255,18), (1,1,rect.width-2,6), border_radius=6)
+    surf.blit(hl_surf, rect.topleft)
+
     for fx, fy in DIE_DOTS[val]:
         cx = int(rect.x + fx * rect.width)
         cy = int(rect.y + fy * rect.height)
-        pygame.draw.circle(surf, dot_color, (cx, cy), r)
+        # Subtle dot shadow
+        pygame.draw.circle(surf, (0,0,0,60), (cx+1, cy+1), dot_r)
+        pygame.draw.circle(surf, dot_color, (cx, cy), dot_r)
+        # Tiny highlight on dot
+        hi_c = tuple(min(255, v+60) for v in dot_color)
+        pygame.draw.circle(surf, hi_c, (cx - dot_r//3, cy - dot_r//3), max(1, dot_r//3))
 
 
 class SettingsScreen:
@@ -985,19 +1080,44 @@ class SettingsScreen:
         surf.fill(C["bg"])
         surf.blit(content, (0, -self.scroll_y))
 
-        # Locked banner (drawn on top of surf, not content)
+        # Full-screen lock overlay (drawn on top)
         if self.locked:
-            banner_h = 52
-            pygame.draw.rect(surf, (40, 25, 10), (0, 0, surf.get_width(), banner_h))
-            pygame.draw.line(surf, (140, 90, 20), (0, banner_h), (surf.get_width(), banner_h), 2)
-            lock_icon = "🔒 " if False else "⚠  "  # just use text
-            draw_text(surf, T("settings_locked"), FONTS["med"], (220, 160, 50),
-                      surf.get_width() // 2, 10, "midtop")
-            draw_text(surf, T("settings_lock_hint"), FONTS["sm"], (160, 120, 40),
-                      surf.get_width() // 2, 30, "midtop")
+            overlay = pygame.Surface((surf.get_width(), surf.get_height()), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, 200))
+            surf.blit(overlay, (0, 0))
 
-        # Scrollbar
-        if self.content_h > surf.get_height():
+            cx = surf.get_width() // 2
+            cy = surf.get_height() // 2 - 30
+
+            # Draw lock icon using shapes (no emoji needed)
+            lk_w, lk_h = 52, 44
+            lk_x, lk_y = cx - lk_w // 2, cy - lk_h // 2 - 10
+            # Shackle (arc = two lines + top rect)
+            shackle_col = (200, 170, 60)
+            pygame.draw.rect(surf, shackle_col,
+                             (lk_x + 10, lk_y - 22, lk_w - 20, 26), 0, border_radius=10)
+            pygame.draw.rect(surf, (0, 0, 0, 0),
+                             (lk_x + 16, lk_y - 16, lk_w - 32, 20), 0)
+            pygame.draw.rect(surf, (18, 18, 24),
+                             (lk_x + 16, lk_y - 16, lk_w - 32, 20))
+            # Body
+            pygame.draw.rect(surf, shackle_col,
+                             (lk_x, lk_y, lk_w, lk_h), 0, border_radius=8)
+            # Keyhole
+            kh_c = (40, 30, 10)
+            pygame.draw.circle(surf, kh_c, (cx, lk_y + 18), 8)
+            pygame.draw.rect(surf, kh_c, (cx - 4, lk_y + 18, 8, 14))
+
+            # Text
+            line1 = T("settings_locked")
+            line2 = T("settings_lock_hint")
+            draw_text(surf, line1, FONTS["big"], (230, 195, 80),
+                      cx, lk_y + lk_h + 20, "midtop")
+            draw_text(surf, line2, FONTS["sm"], (160, 135, 60),
+                      cx, lk_y + lk_h + 52, "midtop")
+
+        # Scrollbar (only when not locked)
+        if self.content_h > surf.get_height() and not self.locked:
             sb_w = 6
             sb_x = surf.get_width() - sb_w - 4
             sb_h = surf.get_height()
@@ -1217,15 +1337,21 @@ class GameScreen:
         self.bx = self.by = 0
         self.bsize = 8; self.sq = 1
         self.sx = self.sy = self.sw_panel = 0
+        # Animation state
+        self.anim: PieceAnim | None = None
+        self._last_move = None   # (fr, fc, tr, tc) for trail highlight
+        self._frame_time = 0.0
 
     def new_game(self):
         self.gs = GameState()
         self.gs.add_log(T("log_newgame"), "sys")
         self.dice_vals = (0, 0)
+        self.anim = None
+        self._last_move = None
 
     def _layout(self, w, h):
-        side_w = 280
-        margin = 16
+        side_w = 290
+        margin = 14
         avail_w = w - side_w - 3 * margin
         avail_h = h - 2 * margin
         self.bsize = min(avail_w, avail_h)
@@ -1241,9 +1367,14 @@ class GameScreen:
 
         bx2 = self.sx + 10
         bw = self.sw_panel - 20
-        self.btn_roll.rect = pygame.Rect(bx2, self.sy + 130, bw, 38)
-        self.btn_end.rect  = pygame.Rect(bx2, self.sy + 174, bw, 38)
-        self.btn_new.rect  = pygame.Rect(bx2, h - 50, bw, 36)
+        # Player panels: 54px each + 4px gap = 112 total → buttons start at sy+118
+        panel_end = self.sy + 54 + 4 + 54   # = sy + 112
+        # Phase badge: 18px → ends at sy+130
+        # Buttons start at sy+134
+        btn_y = panel_end + 24
+        self.btn_roll.rect = pygame.Rect(bx2, btn_y, bw, 38)
+        self.btn_end.rect  = pygame.Rect(bx2, btn_y + 44, bw, 38)
+        self.btn_new.rect  = pygame.Rect(bx2, h - margin - 40, bw, 38)
 
     def click_to_rc(self, mx, my):
         if not (self.bx <= mx < self.bx + self.bsize and self.by <= my < self.by + self.bsize):
@@ -1257,6 +1388,15 @@ class GameScreen:
     def draw(self, surf):
         self._layout(surf.get_width(), surf.get_height())
         surf.fill(C["bg"])
+        # Gradient background
+        for y in range(0, surf.get_height(), 4):
+            t = y / surf.get_height()
+            col = (
+                int(18 + t * 6),
+                int(18 + t * 4),
+                int(24 + t * 8)
+            )
+            pygame.draw.line(surf, col, (0, y), (surf.get_width(), y))
         self._draw_board(surf)
         self._draw_sidebar(surf)
         if self.gs.promo_at:
@@ -1266,80 +1406,161 @@ class GameScreen:
 
     def _draw_board(self, surf):
         gs = self.gs
+        sq = self.sq; bx = self.bx; by = self.by
+
+        # ── Decorative frame ─────────────────────────────────
+        draw_board_frame(surf, bx, by, self.bsize, sq)
+
+        # Pulse alpha for selection glow
+        pulse = _ease_pulse(1.4)
+
+        # ── Squares ──────────────────────────────────────────
         for r in range(8):
             for c in range(8):
                 light = (r + c) % 2 == 0
-                rect = pygame.Rect(self.bx + c * self.sq, self.by + r * self.sq, self.sq, self.sq)
-                if gs.check_sq and (r, c) == gs.check_sq: col_sq = C["sq_check"]
-                elif gs.sel and (r, c) == gs.sel: col_sq = C["sq_sel"]
-                elif gs.legal and any(tr == r and tc == c for tr, tc, _ in gs.legal):
-                    col_sq = C["sq_cap"] if gs.board[r][c] else C["sq_can"]
-                else:
-                    col_sq = C["sq_light"] if light else C["sq_dark"]
-                pygame.draw.rect(surf, col_sq, rect)
-                if r == 7:
-                    draw_text(surf, f2l(c), FONTS["coord"],
-                              C["text3"] if light else C["sq_light"],
-                              rect.right - 3, rect.bottom - 2, "bottomright")
-                if c == 0:
-                    draw_text(surf, str(8 - r), FONTS["coord"],
-                              C["text3"] if light else C["sq_light"],
-                              rect.left + 2, rect.top + 1)
-                p = gs.board[r][c]
-                if p:
-                    psize = int(self.sq * 0.78)
-                    surf_p = piece_surface(p, psize)
-                    pr = surf_p.get_rect(center=rect.center)
-                    surf.blit(surf_p, pr)
-        pygame.draw.rect(surf, C["border2"],
-                         (self.bx-1, self.by-1, self.bsize+2, self.bsize+2),
-                         2, border_radius=4)
+                rect = pygame.Rect(bx + c * sq, by + r * sq, sq, sq)
+                base = C["sq_light"] if light else C["sq_dark"]
+                pygame.draw.rect(surf, base, rect)
 
+                # Last-move trail
+                if self._last_move:
+                    fr, fc, tr, tc = self._last_move
+                    if (r, c) in ((fr, fc), (tr, tc)):
+                        trail = pygame.Surface((sq, sq), pygame.SRCALPHA)
+                        trail.fill((255, 215, 0, 55))
+                        surf.blit(trail, rect.topleft)
+
+                # Check highlight
+                if gs.check_sq and (r, c) == gs.check_sq:
+                    hl = pygame.Surface((sq, sq), pygame.SRCALPHA)
+                    a = int(140 + 80 * pulse)
+                    hl.fill((220, 40, 40, a))
+                    surf.blit(hl, rect.topleft)
+
+                # Selection highlight (pulsing)
+                elif gs.sel and (r, c) == gs.sel:
+                    hl = pygame.Surface((sq, sq), pygame.SRCALPHA)
+                    a = int(120 + 80 * pulse)
+                    hl.fill((80, 130, 220, a))
+                    surf.blit(hl, rect.topleft)
+
+                # Legal move dots / capture highlights
+                elif gs.legal and any(lr == r and lc == c for lr, lc, _ in gs.legal):
+                    is_cap = bool(gs.board[r][c])
+                    hl = pygame.Surface((sq, sq), pygame.SRCALPHA)
+                    if is_cap:
+                        # Ring highlight for captures
+                        hl.fill((0,0,0,0))
+                        col = (210, 60, 60, 160)
+                        pygame.draw.rect(hl, col, (0, 0, sq, sq))
+                        inner = pygame.Surface((sq-12, sq-12), pygame.SRCALPHA)
+                        inner.fill((*base, 0))
+                        hl.blit(inner, (6, 6))
+                        surf.blit(hl, rect.topleft)
+                    else:
+                        # Dot for empty squares
+                        dot_r = max(6, sq // 6)
+                        dot_surf = pygame.Surface((sq, sq), pygame.SRCALPHA)
+                        pygame.draw.circle(dot_surf, (60, 160, 80, 140),
+                                           (sq // 2, sq // 2), dot_r)
+                        surf.blit(dot_surf, rect.topleft)
+
+        # ── Pieces (skip animating piece's source square) ────
+        anim_done = self.anim is None or self.anim.is_done()
+        if anim_done:
+            self.anim = None
+
+        for r in range(8):
+            for c in range(8):
+                p = gs.board[r][c]
+                if not p: continue
+                # If this piece is being animated, skip it here
+                if (self.anim and not self.anim.is_done()
+                        and self.anim.piece == p
+                        and self._last_move
+                        and (r, c) == (self._last_move[2], self._last_move[3])):
+                    continue
+
+                rect = pygame.Rect(bx + c * sq, by + r * sq, sq, sq)
+                psize = int(sq * 0.74)
+                cx, cy = rect.centerx, rect.centery + 2
+
+                # Shadow
+                shad_r = max(4, psize // 4)
+                draw_piece_shadow(surf, cx, cy + psize // 3, shad_r * 2)
+
+                # Piece
+                surf_p = piece_surface(p, psize)
+                pr = surf_p.get_rect(center=(cx, cy))
+                surf.blit(surf_p, pr)
+
+        # ── Animated sliding piece (drawn on top) ────────────
+        if self.anim and not self.anim.is_done():
+            ax, ay = self.anim.pos()
+            psize = int(sq * 0.74)
+            draw_piece_shadow(surf, int(ax), int(ay) + psize // 3, psize // 2)
+            surf_p = piece_surface(self.anim.piece, psize)
+            pr = surf_p.get_rect(center=(int(ax), int(ay)))
+            surf.blit(surf_p, pr)
     def _draw_sidebar(self, surf):
         gs = self.gs
         sx = self.sx; sy = self.sy; sw = self.sw_panel
-        bx2 = sx + 10
-        sh = surf.get_height()
+        bx2 = sx + 10; bw = sw - 20
 
-        for i, color in enumerate(["W","B"]):
-            py = sy + i * 58
+        # ── Player panels ────────────────────────────────────
+        panel_h = 54
+        for i, color in enumerate(["W", "B"]):
+            py = sy + i * (panel_h + 4)
             is_active = gs.turn == color and not gs.over
             bg = C["panel2"] if is_active else C["panel"]
             border = C["accent"] if is_active else C["border"]
-            draw_rect(surf, bg, (sx, py, sw, 52), 8, 2, border)
-
+            draw_rect(surf, bg, (sx, py, sw, panel_h), 8, 2, border)
             name = T("white") if color == "W" else T("black")
-            psurf = piece_surface(("K" if color == "W" else "k"), 22)
+            psurf = piece_surface("K" if color == "W" else "k", 22)
             surf.blit(psurf, (bx2 - 4, py + 6))
-            draw_text(surf, name, FONTS["med"], C["text"], bx2 + 28, py + 14)
-
+            draw_text(surf, name, FONTS["med"],
+                      C["text"] if is_active else C["text2"],
+                      bx2 + 30, py + 8)
             od_val = gs.od[color]
-            od_str = f"{od_val} {T('ap_label')}"
-            draw_text(surf, od_str, FONTS["big"],
+            draw_text(surf, f"{od_val} {T(chr(39)+'ap_label'+chr(39))}", FONTS["big"],
                       C["gold2"] if is_active else C["text2"],
-                      sx + sw - 10, py + 10, "topright")
-
-            bar_w = sw - 20
-            draw_rect(surf, C["bg3"], (bx2, py + 40, bar_w, 6), 3)
-            fill_w = int(bar_w * min(1.0, od_val / 12))
+                      sx + sw - 10, py + 8, "topright")
+            draw_rect(surf, C["bg3"], (bx2, py + 42, bw, 6), 3)
+            fill_w = int(bw * min(1.0, od_val / 12))
             fill_c = C["red2"] if od_val <= 2 and gs.rolled else C["accent"]
             if fill_w > 0:
-                draw_rect(surf, fill_c, (bx2, py + 40, fill_w, 6), 3)
+                draw_rect(surf, fill_c, (bx2, py + 42, fill_w, 6), 3)
 
-        phase_lbl = {"normal": T("phase_normal"), "gambit": T("phase_gambit"), "clash": T("phase_clash")}.get(gs.phase, "")
-        phase_col = C["gold2"] if gs.phase != "normal" else C["text2"]
-        draw_text(surf, phase_lbl, FONTS["sm"], phase_col,
-                  sx + sw // 2, sy + 118, "midtop")
+        panel_end = sy + 2 * panel_h + 4
+        badge_y = panel_end + 8
 
+        # ── Phase badge (only gambit/clash) ──────────────────
+        if gs.phase != "normal":
+            phase_lbl = T("phase_gambit") if gs.phase == "gambit" else T("phase_clash")
+            badge_col = C["gold2"] if gs.phase == "gambit" else C["accent"]
+            badge_bg  = (40, 35, 10) if gs.phase == "gambit" else (15, 25, 50)
+            lw = FONTS["sm"].size(phase_lbl)[0] + 20
+            draw_rect(surf, badge_bg, (sx + (sw - lw) // 2, badge_y, lw, 22), 11)
+            draw_text(surf, phase_lbl, FONTS["sm"], badge_col,
+                      sx + sw // 2, badge_y + 11, "center")
+            badge_h = 28
+        else:
+            badge_h = 0
+
+        # ── Buttons ───────────────────────────────────────────
+        btn_y = badge_y + badge_h + 4
+        self.btn_roll.rect.x = bx2; self.btn_roll.rect.y = btn_y; self.btn_roll.rect.w = bw
+        self.btn_end.rect.x  = bx2; self.btn_end.rect.y  = btn_y + 44; self.btn_end.rect.w = bw
         self.btn_roll.disabled = gs.rolled or gs.over
-        self.btn_end.disabled = not gs.rolled or gs.over
+        self.btn_end.disabled  = not gs.rolled or gs.over
         self.btn_roll.draw(surf)
         self.btn_end.draw(surf)
 
-        dy = self.btn_end.rect.bottom + 16
-        die_size = 42; gap = 12
-        total_w = 2 * die_size + gap
-        dx = sx + (sw - total_w) // 2
+        # ── Dice ──────────────────────────────────────────────
+        die_size = 44; gap = 14
+        dy = self.btn_end.rect.bottom + 14
+        total_dw = 2 * die_size + gap
+        dx = sx + (sw - total_dw) // 2
         d1, d2 = self.dice_vals
         crit = d1 + d2 == 12 and d1 > 0
         fail = d1 + d2 == 2 and d1 > 0
@@ -1347,67 +1568,60 @@ class GameScreen:
         draw_die(surf, d1, pygame.Rect(dx, dy, die_size, die_size), crit, fail, pc_)
         draw_die(surf, d2, pygame.Rect(dx + die_size + gap, dy, die_size, die_size), crit, fail, pc_)
 
-        acts_y = dy + die_size + 10
+        # ── Status line ───────────────────────────────────────
+        acts_y = dy + die_size + 8
         if gs.rolled:
             acts_str = T("actions_label", gs.act_used, settings["max_actions"])
-            if gs.crit and not gs.crit_used: acts_str += " ★"
+            if gs.crit and not gs.crit_used:
+                acts_str += ("  ★ КРИТ" if LANG == "ru" else "  ★ CRIT")
             acts_col = C["gold2"] if gs.crit and not gs.crit_used else C["text2"]
         else:
-            acts_str = T("roll_prompt"); acts_col = C["text2"]
+            acts_str = T("roll_prompt"); acts_col = C["text3"]
         draw_text(surf, acts_str, FONTS["sm"], acts_col, sx + sw // 2, acts_y, "midtop")
 
-        msg_y = acts_y + 24
-        if not gs.over:
-            if gs.check_sq:
-                enemy = opp(gs.turn)
-                en_name = T("white") if enemy == "W" else T("black")
-                draw_text(surf, f"{T('check')} ({en_name})", FONTS["sm"],
-                          C["red2"], sx + sw // 2, msg_y, "midtop")
-                msg_y += 24
-            if gs.phase == "gambit" and gs.rolled:
-                draw_text(surf, T("phase_gambit"), FONTS["sm"], C["gold"],
-                          sx + sw // 2, msg_y, "midtop")
-                msg_y += 24
-            if gs.phase == "clash" and gs.rolled:
-                draw_text(surf, T("phase_clash"), FONTS["sm"], C["accent"],
-                          sx + sw // 2, msg_y, "midtop")
-                msg_y += 24
+        msg_y = acts_y + 22
+        if not gs.over and gs.check_sq:
+            en_name = T("white") if opp(gs.turn) == "W" else T("black")
+            draw_text(surf, f"{T(chr(39)+'check'+chr(39))} ({en_name})", FONTS["sm"],
+                      C["red2"], sx + sw // 2, msg_y, "midtop")
+            msg_y += 22
 
+        # ── Resurrect ─────────────────────────────────────────
         self.res_buttons = []
         if gs.phase == "clash" and gs.rolled and not gs.over:
             res_items = gs.get_resurrectable()
             if res_items:
-                draw_text(surf, T("resurrect"), FONTS["sm"], C["text2"], bx2, msg_y)
-                msg_y += 22
+                draw_text(surf, T("resurrect"), FONTS["xs"], C["text3"], bx2, msg_y)
+                msg_y += 18
                 for t, cost in res_items:
-                    label = f"{TP(t)} ({cost} {T('ap_label')})"
-                    btn = Button((bx2, msg_y, sw - 20, 30), label,
+                    label = f"{TP(t)}  {cost} {T(chr(39)+'ap_label'+chr(39))}"
+                    btn = Button((bx2, msg_y, bw, 28), label,
                                   color=C["bg3"], hover_color=C["panel2"], font=FONTS["sm"])
-                    btn.disabled = gs.act_used >= settings["max_actions"] or gs.od[gs.turn] < cost
+                    btn.disabled = (gs.act_used >= settings["max_actions"] or gs.od[gs.turn] < cost)
                     btn.draw(surf)
                     self.res_buttons.append((btn, t))
-                    msg_y += 34
+                    msg_y += 32
 
-        # Log positioned ABOVE the new game button — does not overlap
-        log_bottom = self.btn_new.rect.top - 10
-        log_top = max(msg_y + 10, log_bottom - 180)
+        # ── Log ───────────────────────────────────────────────
+        log_bottom = self.btn_new.rect.top - 8
+        log_top = max(msg_y + 8, log_bottom - 170)
         log_h = log_bottom - log_top
-        if log_h > 50:
+        if log_h > 44:
             draw_rect(surf, C["panel"], (sx, log_top, sw, log_h), 8, 1, C["border"])
-            draw_text(surf, T("log_title"), FONTS["xs"], C["text3"], bx2, log_top + 6)
-            line_y = log_top + 24
-            for msg, mc in gs.log:
-                if line_y + 18 > log_top + log_h - 6: break
-                col_text = C["gold2"] if mc == "W" else C["text2"] if mc == "B" else C["text3"]
-                s = msg
-                while FONTS["xs"].size(s)[0] > sw - 24 and len(s) > 4:
+            draw_text(surf, T("log_title"), FONTS["xs"], C["text3"], bx2, log_top + 5)
+            line_y = log_top + 22
+            for msg_txt, mc in gs.log:
+                if line_y + 16 > log_top + log_h - 6: break
+                col_text = (C["gold2"] if mc == "W" else
+                            C["text2"] if mc == "B" else C["text3"])
+                s = msg_txt
+                while FONTS["xs"].size(s)[0] > bw - 4 and len(s) > 4:
                     s = s[:-1]
-                if len(s) < len(msg): s = s[:-3] + "..."
+                if len(s) < len(msg_txt): s = s[:-3] + "..."
                 draw_text(surf, s, FONTS["xs"], col_text, bx2, line_y)
-                line_y += 18
+                line_y += 17
 
         self.btn_new.draw(surf)
-
     def _draw_promo(self, surf):
         ow = pygame.Surface((surf.get_width(), surf.get_height()), pygame.SRCALPHA)
         ow.fill((0,0,0,160))
@@ -1486,6 +1700,16 @@ class GameScreen:
                     mv = next((m for m in gs.legal if m[0] == r and m[1] == c), None)
                     if mv:
                         fr, fc = gs.sel
+                        # Start slide animation
+                        p = gs.board[fr][fc]
+                        if p:
+                            sq = self.sq
+                            sx0 = self.bx + fc * sq + sq // 2
+                            sy0 = self.by + fr * sq + sq // 2
+                            ex0 = self.bx + mv[1] * sq + sq // 2
+                            ey0 = self.by + mv[0] * sq + sq // 2
+                            self.anim = PieceAnim(p, sx0, sy0, ex0, ey0)
+                        self._last_move = (fr, fc, mv[0], mv[1])
                         gs.sel = None; gs.legal = []
                         gs.execute_move(fr, fc, *mv)
                         return
@@ -1537,31 +1761,40 @@ class App:
 
     def draw_tabs(self):
         surf = self.screen
-        self.btn_lang.rect = pygame.Rect(self.W - 100, 6, 90, 32)
+        lang_w = 96
+        lang_margin = 6
+        self.btn_lang.rect = pygame.Rect(self.W - lang_w - lang_margin, 6, lang_w, 32)
         self.btn_lang.draw(surf)
 
-        tabs_total_w = self.W - 110
-        tab_w = (tabs_total_w - 8 * (len(self.tabs) - 1)) // len(self.tabs)
+        # Tabs only go up to where lang button starts
+        tabs_right = self.W - lang_w - lang_margin * 2 - 8
+        tabs_left = 8
+        n = len(self.tabs)
+        gap = 6
+        tab_w = (tabs_right - tabs_left - gap * (n - 1)) // n
         for i, t in enumerate(self.tabs):
-            tx = 10 + i * (tab_w + 8)
-            ty = 8
+            tx = tabs_left + i * (tab_w + gap)
+            ty = 7
+            th = self.TAB_H - 14
             is_active = t == self.tab
             bg = C["tab_active"] if is_active else C["bg3"]
-            draw_rect(surf, bg, (tx, ty, tab_w, self.TAB_H - 14), 8,
+            draw_rect(surf, bg, (tx, ty, tab_w, th), 8,
                       1 if is_active else 0, C["border"])
             draw_text(surf, T(self.tab_label_keys[t]), FONTS["med"],
                       C["text"] if is_active else C["text2"],
-                      tx + tab_w // 2, ty + (self.TAB_H - 14) // 2, "center")
+                      tx + tab_w // 2, ty + th // 2, "center")
         pygame.draw.line(surf, C["border"], (0, self.TAB_H), (self.W, self.TAB_H), 1)
 
     def handle_tabs(self, event):
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             x, y = event.pos
             if y < self.TAB_H:
-                tabs_total_w = self.W - 110
-                tab_w = (tabs_total_w - 8 * (len(self.tabs) - 1)) // len(self.tabs)
+                lang_w = 96; lang_margin = 6
+                tabs_right = self.W - lang_w - lang_margin * 2 - 8
+                tabs_left = 8; n = len(self.tabs); gap = 6
+                tab_w = (tabs_right - tabs_left - gap * (n - 1)) // n
                 for i, t in enumerate(self.tabs):
-                    tx = 10 + i * (tab_w + 8)
+                    tx = tabs_left + i * (tab_w + gap)
                     if tx <= x <= tx + tab_w:
                         self.tab = t; return True
         return False
