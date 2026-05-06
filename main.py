@@ -1699,59 +1699,65 @@ class TutorialScreen:
         self.step = max(0, min(self.step, total - 1))
         title, body = steps[self.step]
 
-        # Progress bar
-        counter_str = f"{self.step+1} / {total}"
-        counter_w = FONTS["sm"].size(counter_str)[0] + 12
-        bar_x, bar_y = 50, 20
-        bar_w = sw - bar_x - counter_w - 16
+        # ── Progress bar ──────────────────────────────────────
+        margin = 40
+        bar_h = 6
+        bar_y = 16
+        counter_str = f"{self.step + 1} / {total}"
+        counter_w = FONTS["sm"].size(counter_str)[0] + 16
+        bar_x = margin
+        bar_w = sw - margin * 2 - counter_w - 8
 
-        # Bar track
-        pygame.draw.rect(surf, C["bg3"], (bar_x, bar_y + 4, bar_w, 4), border_radius=2)
-        prog = int(bar_w * (self.step + 1) / total)
-        pygame.draw.rect(surf, C["accent"], (bar_x, bar_y + 4, prog, 4), border_radius=2)
+        pygame.draw.rect(surf, C["bg3"], (bar_x, bar_y, bar_w, bar_h), border_radius=3)
+        fill_w = int(bar_w * (self.step + 1) / total)
+        pygame.draw.rect(surf, C["accent"], (bar_x, bar_y, fill_w, bar_h), border_radius=3)
 
-        # Step dots — evenly spaced across bar
+        seg = bar_w / total
         for i in range(total):
-            dx = bar_x + int(bar_w * (i + 0.5) / total)
+            dx = int(bar_x + seg * i + seg / 2)
+            dy = bar_y + bar_h // 2
             col = C["accent"] if i <= self.step else C["bg3"]
-            r = 5 if i == self.step else 3
-            pygame.draw.circle(surf, col, (dx, bar_y + 6), r)
+            if i == self.step:
+                pygame.draw.circle(surf, C["text"], (dx, dy), 7)
+            pygame.draw.circle(surf, col, (dx, dy), 5)
 
-        # Counter (right side)
-        draw_text(surf, counter_str, FONTS["sm"], C["text3"],
-                  bar_x + bar_w + 10, bar_y + 6, "midleft")
+        draw_text(surf, counter_str, FONTS["sm"], C["text2"],
+                  bar_x + bar_w + 10, bar_y + bar_h // 2, "midleft")
 
-        # Layout: left side = text, right side = illustration
-        content_y = bar_y + 28
-        content_h = sh - content_y - 70
-        split = int(sw * 0.52)
+        # ── Content area ──────────────────────────────────────
+        gap_between = 18
+        content_y = bar_y + bar_h + 18
+        content_h = sh - content_y - 68
+        left_w = int(sw * 0.46)
+        right_w = sw - margin * 2 - left_w - gap_between
 
-        # Left card (text)
-        card_pad = 14
-        draw_rect(surf, C["panel"], (50, content_y, split - 60, content_h), 12, 1, C["border"])
+        card_pad = 16
+        left_x = margin
+        draw_rect(surf, C["panel"], (left_x, content_y, left_w, content_h), 10, 1, C["border"])
+
         draw_text(surf, title, FONTS["big"], C["gold2"],
-                  50 + card_pad, content_y + 18)
+                  left_x + card_pad, content_y + 14)
+        title_h = FONTS["big"].get_height()
+        sep_y = content_y + 14 + title_h + 8
         pygame.draw.line(surf, C["border"],
-                         (50 + card_pad, content_y + 50),
-                         (split - 60 - card_pad, content_y + 50), 1)
-        text_x = 50 + card_pad
-        text_y = content_y + 60
-        max_tw = split - 60 - card_pad * 2
+                         (left_x + card_pad, sep_y),
+                         (left_x + left_w - card_pad, sep_y), 1)
+
+        text_x = left_x + card_pad
+        text_y = sep_y + 10
+        max_tw = left_w - card_pad * 2
         lines = wrap_text(body, FONTS["med"], max_tw)
-        lh = FONTS["med"].get_height() + 6
+        lh = FONTS["med"].get_height() + 5
         for i, line in enumerate(lines):
             ly = text_y + i * lh
-            if ly + lh > content_y + content_h - 10: break
+            if ly + lh > content_y + content_h - 8: break
             draw_text(surf, line, FONTS["med"], C["text"], text_x, ly)
 
-        # Right panel (illustration)
-        illus_x = split - 10
-        illus_w = sw - illus_x - 50
-        illus_area = pygame.Rect(illus_x, content_y, illus_w, content_h)
-        draw_rect(surf, C["panel2"], illus_area, 12, 1, C["border2"])
+        illus_x = left_x + left_w + gap_between
+        illus_area = pygame.Rect(illus_x, content_y, right_w, content_h)
+        draw_rect(surf, C["panel2"], illus_area, 10, 1, C["border2"])
         illus_surf = self._get_illustration(self.step, illus_area)
         surf.blit(illus_surf, illus_area.topleft)
-
         # Navigation buttons
         btn_y = sh - 56
         bw = 160; gap = 16; cx2 = sw // 2
@@ -1988,31 +1994,31 @@ class GameScreen:
                 psize = int(sq * 0.74)
                 cx, cy = rect.centerx, rect.centery
 
-                # Draw piece centred on square
+                # Shadow FIRST (before piece) — fixed ellipse at bottom of square
+                shw = max(6, sq * 55 // 100)
+                shh = max(3, sq * 7 // 100)
+                shadow_y = rect.bottom - shh - 1
+                shad = pygame.Surface((shw, shh), pygame.SRCALPHA)
+                pygame.draw.ellipse(shad, (0, 0, 0, 52), (0, 0, shw, shh))
+                surf.blit(shad, (cx - shw // 2, shadow_y))
+
+                # Piece on top
                 surf_p = piece_surface(p, psize)
                 pr = surf_p.get_rect(center=(cx, cy))
                 surf.blit(surf_p, pr)
-
-                # Shadow: small ellipse just below the piece, same centre x
-                shw = max(4, int(psize * 0.52))
-                shh = max(2, int(psize * 0.08))
-                shad = pygame.Surface((shw + 2, shh + 2), pygame.SRCALPHA)
-                pygame.draw.ellipse(shad, (0, 0, 0, 50), (1, 1, shw, shh))
-                surf.blit(shad, (cx - shw // 2 - 1, pr.bottom - shh - 2))
 
         # ── Animated sliding piece (drawn on top) ────────────
         if self.anim and not self.anim.is_done():
             ax, ay = self.anim.pos()
             psize = int(sq * 0.74)
+            # Shadow slightly spread for "floating" look
+            shw = max(6, sq * 48 // 100)
+            shh = max(3, sq * 6 // 100)
+            shad = pygame.Surface((shw, shh), pygame.SRCALPHA)
+            pygame.draw.ellipse(shad, (0, 0, 0, 38), (0, 0, shw, shh))
+            surf.blit(shad, (int(ax) - shw // 2, int(ay) + psize // 2 - shh + 2))
             surf_p = piece_surface(self.anim.piece, psize)
-            pr = surf_p.get_rect(center=(int(ax), int(ay) - 3))
-            surf.blit(surf_p, pr)
-            # Shadow at bottom of animated piece
-            shw = max(4, int(psize * 0.46))
-            shh = max(2, int(psize * 0.07))
-            shad = pygame.Surface((shw + 2, shh + 2), pygame.SRCALPHA)
-            pygame.draw.ellipse(shad, (0, 0, 0, 35), (1, 1, shw, shh))
-            surf.blit(shad, (int(ax) - shw // 2 - 1, pr.bottom - shh - 1))
+            surf.blit(surf_p, surf_p.get_rect(center=(int(ax), int(ay) - 3)))
     def _draw_sidebar(self, surf):
         gs = self.gs
         sx = self.sx; sy = self.sy; sw = self.sw_panel
@@ -2763,20 +2769,23 @@ class App:
     def __init__(self):
         self.W, self.H = 1100, 700
         self.MIN_W, self.MIN_H = 900, 600
-        self.screen = pygame.display.set_mode((self.W, self.H), pygame.RESIZABLE)
-        pygame.display.set_caption("Chess of Evil")
-        self.clock = pygame.time.Clock()
 
-        # Set window icon
+        # Icon MUST be set before display.set_mode on Windows
         icon_path = resource_path("assets/icon_256.png")
         if not os.path.exists(icon_path):
             icon_path = resource_path("assets/icon_32.png")
         if os.path.exists(icon_path):
             try:
-                icon_surf = pygame.image.load(icon_path)
-                pygame.display.set_icon(icon_surf)
+                icon_surf = pygame.image.load(icon_path).convert_alpha()
+                # Windows taskbar works best with 32x32
+                icon32 = pygame.transform.smoothscale(icon_surf, (32, 32))
+                pygame.display.set_icon(icon32)
             except Exception:
                 pass
+
+        self.screen = pygame.display.set_mode((self.W, self.H), pygame.RESIZABLE)
+        pygame.display.set_caption("Chess of Evil")
+        self.clock = pygame.time.Clock()
 
         load_fonts()
         clear_piece_cache()
