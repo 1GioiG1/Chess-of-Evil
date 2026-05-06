@@ -922,7 +922,8 @@ class SettingsScreen:
         self.content_h = 0
         self.spinners_piece = {}
         self.spinners_global = {}
-        self.locked = False   # True during active game
+        self.locked = False
+        self._flash = None    # ("save"|"reset", timestamp) for button flash
         self._build_widgets()
 
     def _build_widgets(self):
@@ -945,13 +946,13 @@ class SettingsScreen:
 
     def _layout(self, w, h):
         self.surf_w = w; self.surf_h = h
-        margin = 30
-        max_w = min(880, w - 2 * margin)
+        margin = 40
+        max_w = min(860, w - 2 * margin)
         x_start = (w - max_w) // 2
 
-        col_label = 130
+        col_label = 140
         col_w = (max_w - col_label) // 3
-        spinner_w = min(120, col_w - 24)
+        spinner_w = min(130, col_w - 28)
 
         self._x_label = x_start + 8
         self._spinner_w = spinner_w
@@ -963,40 +964,40 @@ class SettingsScreen:
         self._x_start = x_start
         self._max_w = max_w
 
-        y = 24
+        y = 28
         self._title_y = y
-        y += 50
-        self._piece_header_y = y
-        # Header now takes 50px (title + 2 hint lines)
-        y += 50
-        row_h = 44
+        y += 54
+        self._piece_header_y = y    # column titles start here
+        header_block = 66           # title (18) + gap (6) + hint line1 (13) + hint line2 (13) + gap (16)
+        y += header_block
+        row_h = 50                  # 9px top gap + 32px spinner + 9px bottom
 
         for i, t in enumerate(PIECE_TYPES):
-            ry = y + i * row_h
+            ry = y + i * row_h + (row_h - 32) // 2
             for j, key_kind in enumerate(["move", "res_cost", "res_count"]):
                 cx = self._col_centers[j]
                 self.spinners_piece[(key_kind, t)].set_rect(
                     (cx - spinner_w // 2, ry, spinner_w, 32))
-        y += len(PIECE_TYPES) * row_h + 24
+        y += len(PIECE_TYPES) * row_h + 28
         self._sep_y = y
-        y += 18
+        y += 22
         self._global_header_y = y
-        y += 32
+        y += 36
 
         x_global_label = x_start + 16
         x_global_spin = x_start + max_w - spinner_w - 16
-        # Global rows are taller (label + hint)
-        global_row_h = 54
+        global_row_h = 64          # label (16) + hint (13) + gap (3) + spinner (32)
         for i, k in enumerate(["max_actions","crit_ap","fail_penalty","castle_cost"]):
-            ry = y + i * global_row_h
-            self.spinners_global[k].set_rect((x_global_spin, ry + 18, spinner_w, 32))
+            ry = y + i * global_row_h + 29
+            self.spinners_global[k].set_rect((x_global_spin, ry, spinner_w, 32))
         self._x_global_label = x_global_label
-        y += 4 * global_row_h + 12
+        self._global_row_h = global_row_h
+        y += 4 * global_row_h + 16
 
         # En passant toggle row
         self._ep_y = y
         self._ep_toggle_x = x_global_spin + spinner_w - self.ep_toggle.w
-        self.ep_toggle.set_pos(self._ep_toggle_x, y + 2)
+        self.ep_toggle.set_pos(self._ep_toggle_x, y + 28)
         y += global_row_h + 10
 
         btn_w = 160; btn_gap = 16
@@ -1004,9 +1005,8 @@ class SettingsScreen:
         bx = (w - total) // 2
         self.btn_save.rect = pygame.Rect(bx, y, btn_w, 40)
         self.btn_reset.rect = pygame.Rect(bx + btn_w + btn_gap, y, btn_w, 40)
-        y += 60
+        y += 65
         self.content_h = y
-
     def draw(self, surf):
         self._layout(surf.get_width(), surf.get_height())
         max_scroll = max(0, self.content_h - surf.get_height())
@@ -1026,16 +1026,18 @@ class SettingsScreen:
         for i, (hdr, hint_key) in enumerate(zip(headers, hints)):
             draw_text(content, hdr, FONTS["sm"], C["text2"],
                       self._col_centers[i], self._piece_header_y + 2, "midtop")
-            hint_lines = wrap_text(T(hint_key), FONTS["xs"], self._spinner_w + 30)
-            for j, line in enumerate(hint_lines[:2]):
+            hint_lines = wrap_text(T(hint_key), FONTS["xs"], self._spinner_w + 24)
+            for j, line in enumerate(hint_lines[:3]):
                 draw_text(content, line, FONTS["xs"], C["text3"],
-                          self._col_centers[i], self._piece_header_y + 20 + j * 14, "midtop")
+                          self._col_centers[i], self._piece_header_y + 22 + j * 13, "midtop")
 
-        row_h = 44
+        row_h = 52   # must match _layout
         for i, t in enumerate(PIECE_TYPES):
-            ry = self._piece_header_y + 50 + i * row_h
+            # spinner is already positioned; just draw it and the label centred on same row
+            sp0 = self.spinners_piece[("move", t)]
+            label_cy = sp0.rect.centery
             draw_text(content, TP(t), FONTS["med"], C["text"],
-                      self._x_label, ry + 16, "midleft")
+                      self._x_label, label_cy, "midleft")
             for kind in ["move","res_cost","res_count"]:
                 self.spinners_piece[(kind, t)].draw(content)
 
@@ -1055,7 +1057,7 @@ class SettingsScreen:
         keys = ["max_actions","crit_ap","fail_penalty","castle_cost"]
         for k, (lbl, hint_key) in zip(keys, labels_hints):
             sp = self.spinners_global[k]
-            row_top = sp.rect.top - 18
+            row_top = sp.rect.top - 28   # spinner is 28px below row top
             draw_text(content, lbl, FONTS["med"], C["text"],
                       self._x_global_label, row_top + 2, "topleft")
             draw_text(content, T(hint_key), FONTS["xs"], C["text3"],
@@ -1076,6 +1078,36 @@ class SettingsScreen:
         self.btn_reset.disabled = self.locked
         self.btn_save.draw(content)
         self.btn_reset.draw(content)
+
+        # Flash animation over the triggered button
+        if self._flash:
+            which, t0 = self._flash
+            elapsed = _time.monotonic() - t0
+            FLASH_DUR = 0.55
+            if elapsed < FLASH_DUR:
+                prog = elapsed / FLASH_DUR
+                # Alpha: spike up then fade
+                alpha = int(220 * (1 - prog) ** 1.5)
+                btn = self.btn_save if which == "save" else self.btn_reset
+                # Draw coloured overlay
+                flash_col = (60, 200, 100) if which == "save" else (200, 100, 60)
+                fl = pygame.Surface((btn.rect.width, btn.rect.height), pygame.SRCALPHA)
+                fl.fill((*flash_col, alpha))
+                pygame.draw.rect(fl, (*flash_col, min(255, alpha + 60)),
+                                 (0, 0, btn.rect.width, btn.rect.height), 2, border_radius=8)
+                content.blit(fl, btn.rect.topleft)
+                # Checkmark / X text
+                icon = "✓  Сохранено" if (which == "save" and LANG == "ru") else \
+                       "✓  Saved"    if which == "save" else \
+                       "↺  Сброшено" if LANG == "ru" else "↺  Reset"
+                icon_alpha = min(255, int(255 * (1 - prog * 0.5)))
+                icon_col = (220, 255, 220, icon_alpha) if which == "save" else (255, 220, 200, icon_alpha)
+                ic = FONTS["sm"].render(icon, True, icon_col[:3])
+                ic.set_alpha(icon_alpha)
+                content.blit(ic, ic.get_rect(center=btn.rect.center))
+            else:
+                self._flash = None
+
 
         surf.fill(C["bg"])
         surf.blit(content, (0, -self.scroll_y))
@@ -1155,9 +1187,13 @@ class SettingsScreen:
                 btn.update_hover((event.pos[0], event.pos[1] + self.scroll_y))
 
         if self.btn_save.clicked(ev):
-            self._apply(); return "saved"
+            self._apply()
+            self._flash = ("save", _time.monotonic())
+            return "saved"
         if self.btn_reset.clicked(ev):
-            self._reset(); return "reset"
+            self._reset()
+            self._flash = ("reset", _time.monotonic())
+            return "reset"
         return None
 
     def _apply(self):
@@ -1350,31 +1386,34 @@ class GameScreen:
         self._last_move = None
 
     def _layout(self, w, h):
-        side_w = 290
-        margin = 14
-        avail_w = w - side_w - 3 * margin
-        avail_h = h - 2 * margin
+        side_w = 296
+        frame = 18         # board decorative frame thickness
+        margin_top = 22
+        margin_bot = 28    # extra bottom breathing room
+        margin_left = 22
+        board_gap = 22     # gap between board right edge and side panel
+
+        avail_w = w - side_w - margin_left * 2 - board_gap - frame * 2
+        avail_h = h - margin_top - margin_bot - frame * 2
         self.bsize = min(avail_w, avail_h)
         self.bsize = (self.bsize // 8) * 8
         if self.bsize < 240: self.bsize = 240
         self.sq = self.bsize // 8
-        self.bx = margin + (avail_w - self.bsize) // 2
-        self.by = margin + (avail_h - self.bsize) // 2
+        # Board position leaves room for frame on all sides
+        self.bx = margin_left + frame + (avail_w - self.bsize) // 2
+        self.by = margin_top + frame + (avail_h - self.bsize) // 2
 
-        self.sx = self.bx + self.bsize + margin
-        self.sy = margin
-        self.sw_panel = w - self.sx - margin
+        self.sx = self.bx + self.bsize + frame + board_gap
+        self.sy = margin_top
+        self.sw_panel = w - self.sx - margin_left
 
         bx2 = self.sx + 10
         bw = self.sw_panel - 20
-        # Player panels: 54px each + 4px gap = 112 total → buttons start at sy+118
-        panel_end = self.sy + 54 + 4 + 54   # = sy + 112
-        # Phase badge: 18px → ends at sy+130
-        # Buttons start at sy+134
+        panel_end = self.sy + 54 + 4 + 54
         btn_y = panel_end + 24
         self.btn_roll.rect = pygame.Rect(bx2, btn_y, bw, 38)
         self.btn_end.rect  = pygame.Rect(bx2, btn_y + 44, bw, 38)
-        self.btn_new.rect  = pygame.Rect(bx2, h - margin - 40, bw, 38)
+        self.btn_new.rect  = pygame.Rect(bx2, h - margin_bot - 40, bw, 38)
 
     def click_to_rc(self, mx, my):
         if not (self.bx <= mx < self.bx + self.bsize and self.by <= my < self.by + self.bsize):
@@ -1446,24 +1485,53 @@ class GameScreen:
 
                 # Legal move dots / capture highlights
                 elif gs.legal and any(lr == r and lc == c for lr, lc, _ in gs.legal):
+                    # Find the specific move to check its special type
+                    move_sp = next((sp for lr, lc, sp in gs.legal if lr == r and lc == c), None)
                     is_cap = bool(gs.board[r][c])
+                    is_castle = move_sp in ("ck", "cq")
+                    is_ep = move_sp == "ep"
+
                     hl = pygame.Surface((sq, sq), pygame.SRCALPHA)
-                    if is_cap:
-                        # Ring highlight for captures
-                        hl.fill((0,0,0,0))
+
+                    if is_cap and not is_ep:
+                        # Red ring for captures
                         col = (210, 60, 60, 160)
                         pygame.draw.rect(hl, col, (0, 0, sq, sq))
                         inner = pygame.Surface((sq-12, sq-12), pygame.SRCALPHA)
                         inner.fill((*base, 0))
                         hl.blit(inner, (6, 6))
                         surf.blit(hl, rect.topleft)
-                    else:
-                        # Dot for empty squares
+                    elif is_castle:
+                        # Gold diamond shape for castling
+                        cx2, cy2 = sq // 2, sq // 2
+                        d = max(8, sq // 4)
+                        points = [(cx2, cy2-d), (cx2+d, cy2), (cx2, cy2+d), (cx2-d, cy2)]
+                        pygame.draw.polygon(hl, (210, 175, 50, 180), points)
+                        pygame.draw.polygon(hl, (255, 220, 80, 220), points, 2)
+                        surf.blit(hl, rect.topleft)
+                        # Small crown text hint
+                        draw_text(surf, "♜↔♚" if False else "0-0", FONTS["coord"],
+                                  (220, 190, 70), rect.centerx, rect.bottom - 10, "center")
+                    elif is_ep:
+                        # Cyan ghost dot for en passant
                         dot_r = max(6, sq // 6)
-                        dot_surf = pygame.Surface((sq, sq), pygame.SRCALPHA)
-                        pygame.draw.circle(dot_surf, (60, 160, 80, 140),
+                        pygame.draw.circle(hl, (60, 200, 220, 160),
                                            (sq // 2, sq // 2), dot_r)
-                        surf.blit(dot_surf, rect.topleft)
+                        # Ghost pawn outline
+                        ghost_sz = max(8, sq // 4)
+                        pygame.draw.circle(hl, (60, 220, 240, 80),
+                                           (sq // 2, sq // 2), ghost_sz)
+                        pygame.draw.circle(hl, (60, 220, 240, 140),
+                                           (sq // 2, sq // 2), ghost_sz, 2)
+                        surf.blit(hl, rect.topleft)
+                        draw_text(surf, "ep", FONTS["coord"],
+                                  (80, 220, 240), rect.centerx, rect.bottom - 10, "center")
+                    else:
+                        # Standard green dot for normal moves
+                        dot_r = max(6, sq // 6)
+                        pygame.draw.circle(hl, (60, 160, 80, 140),
+                                           (sq // 2, sq // 2), dot_r)
+                        surf.blit(hl, rect.topleft)
 
         # ── Pieces (skip animating piece's source square) ────
         anim_done = self.anim is None or self.anim.is_done()
@@ -1522,7 +1590,7 @@ class GameScreen:
                       C["text"] if is_active else C["text2"],
                       bx2 + 30, py + 8)
             od_val = gs.od[color]
-            draw_text(surf, f"{od_val} {T(chr(39)+'ap_label'+chr(39))}", FONTS["big"],
+            draw_text(surf, f"{od_val} {T('ap_label')}", FONTS["big"],
                       C["gold2"] if is_active else C["text2"],
                       sx + sw - 10, py + 8, "topright")
             draw_rect(surf, C["bg3"], (bx2, py + 42, bw, 6), 3)
@@ -1582,7 +1650,7 @@ class GameScreen:
         msg_y = acts_y + 22
         if not gs.over and gs.check_sq:
             en_name = T("white") if opp(gs.turn) == "W" else T("black")
-            draw_text(surf, f"{T(chr(39)+'check'+chr(39))} ({en_name})", FONTS["sm"],
+            draw_text(surf, f"{T('check')} ({en_name})", FONTS["sm"],
                       C["red2"], sx + sw // 2, msg_y, "midtop")
             msg_y += 22
 
@@ -1594,7 +1662,7 @@ class GameScreen:
                 draw_text(surf, T("resurrect"), FONTS["xs"], C["text3"], bx2, msg_y)
                 msg_y += 18
                 for t, cost in res_items:
-                    label = f"{TP(t)}  {cost} {T(chr(39)+'ap_label'+chr(39))}"
+                    label = f"{TP(t)}  {cost} {T('ap_label')}"
                     btn = Button((bx2, msg_y, bw, 28), label,
                                   color=C["bg3"], hover_color=C["panel2"], font=FONTS["sm"])
                     btn.disabled = (gs.act_used >= settings["max_actions"] or gs.od[gs.turn] < cost)
