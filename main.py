@@ -1966,8 +1966,11 @@ class GameScreen:
                 psize = int(sq * 0.74)
                 cx, cy = rect.centerx, rect.centery
 
-                # Shadow at bottom of square
-                draw_piece_shadow(surf, cx, rect.bottom - 2, psize)
+                # Shadow: flat ellipse at bottom of square, centred horizontally
+                shw = int(psize * 0.60); shh = max(3, int(psize * 0.10))
+                shad_surf = pygame.Surface((shw, shh), pygame.SRCALPHA)
+                pygame.draw.ellipse(shad_surf, (0, 0, 0, 55), (0, 0, shw, shh))
+                surf.blit(shad_surf, (cx - shw // 2, rect.bottom - shh - 1))
 
                 # Piece
                 surf_p = piece_surface(p, psize)
@@ -1978,10 +1981,13 @@ class GameScreen:
         if self.anim and not self.anim.is_done():
             ax, ay = self.anim.pos()
             psize = int(sq * 0.74)
-            draw_piece_shadow(surf, int(ax), int(ay) + psize // 2 + 4, psize)
+            # Shadow slightly below for "lifted" look
+            shw = int(psize * 0.55); shh = max(3, int(psize * 0.09))
+            shad_surf = pygame.Surface((shw, shh), pygame.SRCALPHA)
+            pygame.draw.ellipse(shad_surf, (0, 0, 0, 40), (0, 0, shw, shh))
+            surf.blit(shad_surf, (int(ax) - shw // 2, int(ay) + psize // 2 - shh))
             surf_p = piece_surface(self.anim.piece, psize)
-            pr = surf_p.get_rect(center=(int(ax), int(ay) - 4))
-
+            pr = surf_p.get_rect(center=(int(ax), int(ay) - 3))
             surf.blit(surf_p, pr)
     def _draw_sidebar(self, surf):
         gs = self.gs
@@ -2155,7 +2161,10 @@ class GameScreen:
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 for rect, t in self.promo_buttons:
                     if rect.collidepoint(event.pos):
-                        gs.promote(t); return
+                        gs.promote(t)
+                        if self.lan and self.lan.connected:
+                            self.lan.send({"type":"promo","piece":t})
+                        return
             return
 
         if gs.over:
@@ -2193,6 +2202,12 @@ class GameScreen:
                         self._last_move = (fr, fc, mv[0], mv[1])
                         gs.sel = None; gs.legal = []
                         gs.execute_move(fr, fc, *mv)
+                        # Send move to LAN opponent
+                        if self.lan and self.lan.connected:
+                            self.lan.send({"type":"move",
+                                           "fr":fr,"fc":fc,
+                                           "tr":mv[0],"tc":mv[1],
+                                           "sp":mv[2]})
                         return
                     gs.sel = None; gs.legal = []
                 if gs.can_select(r, c):
@@ -2232,15 +2247,18 @@ class GameScreen:
         """Called every frame. Handles bot moves and LAN messages."""
         gs = self.gs
 
-        # ── LAN receive ───────────────────────────────────────
+        # ── LAN receive ── process ALL pending messages ───────
         if self.lan and self.lan.connected:
-            msg = self.lan.poll()
-            if msg:
+            while True:
+                msg = self.lan.poll()
+                if msg is None:
+                    break
                 mtype = msg.get("type")
                 if mtype == "move":
-                    fr,fc,tr,tc,sp = msg["fr"],msg["fc"],msg["tr"],msg["tc"],msg.get("sp")
+                    fr,fc,tr,tc = msg["fr"],msg["fc"],msg["tr"],msg["tc"]
+                    sp = msg.get("sp")
                     p = gs.board[fr][fc]
-                    if p:
+                    if p and self.sq > 1:
                         sq = self.sq
                         self.anim = PieceAnim(p,
                             self.bx+fc*sq+sq//2, self.by+fr*sq+sq//2,
@@ -2548,6 +2566,15 @@ class App:
                                 color=C["bg3"], hover_color=C["btn_hover"])
         self.show_mode_screen = True  # show on first launch
 
+    def _active_tabs(self):
+        """Return tabs to show based on current state."""
+        if self.show_mode_screen:
+            return ["settings", "learn"]   # mode screen: settings + tutorial only
+        gs = self.game_screen.gs
+        if gs.game_started and not gs.over:
+            return ["game"]               # during game: only Game tab
+        return ["game", "settings", "learn"]  # pre/post game: all tabs
+
     def draw_tabs(self):
         surf = self.screen
         lang_w = 96
@@ -2555,17 +2582,21 @@ class App:
         self.btn_lang.rect = pygame.Rect(self.W - lang_w - lang_margin, 6, lang_w, 32)
         self.btn_lang.draw(surf)
 
-        # Tabs only go up to where lang button starts
+        active_tabs = self._active_tabs()
+        if not active_tabs:
+            pygame.draw.line(surf, C["border"], (0, self.TAB_H), (self.W, self.TAB_H), 1)
+            return
+
         tabs_right = self.W - lang_w - lang_margin * 2 - 8
         tabs_left = 8
-        n = len(self.tabs)
+        n = len(active_tabs)
         gap = 6
         tab_w = (tabs_right - tabs_left - gap * (n - 1)) // n
-        for i, t in enumerate(self.tabs):
+        for i, t in enumerate(active_tabs):
             tx = tabs_left + i * (tab_w + gap)
             ty = 7
             th = self.TAB_H - 14
-            is_active = t == self.tab
+            is_active = (t == self.tab) or (self.show_mode_screen and t == self.tab)
             bg = C["tab_active"] if is_active else C["bg3"]
             draw_rect(surf, bg, (tx, ty, tab_w, th), 8,
                       1 if is_active else 0, C["border"])
@@ -2578,11 +2609,14 @@ class App:
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             x, y = event.pos
             if y < self.TAB_H:
+                active_tabs = self._active_tabs()
+                if not active_tabs:
+                    return False
                 lang_w = 96; lang_margin = 6
                 tabs_right = self.W - lang_w - lang_margin * 2 - 8
-                tabs_left = 8; n = len(self.tabs); gap = 6
+                tabs_left = 8; n = len(active_tabs); gap = 6
                 tab_w = (tabs_right - tabs_left - gap * (n - 1)) // n
-                for i, t in enumerate(self.tabs):
+                for i, t in enumerate(active_tabs):
                     tx = tabs_left + i * (tab_w + gap)
                     if tx <= x <= tx + tab_w:
                         self.tab = t; return True
@@ -2604,14 +2638,28 @@ class App:
                         self.H = max(event.h, self.MIN_H)
                         self.screen = pygame.display.set_mode((self.W, self.H), pygame.RESIZABLE)
                         clear_piece_cache()
-                    # Lang button (in tab bar, full screen coords)
+                    # Lang button
                     if event.type == pygame.MOUSEMOTION:
                         self.btn_lang.update_hover(event.pos)
                     if self.btn_lang.clicked(event):
                         LANG = "en" if LANG == "ru" else "ru"
-                    # Mode screen gets offset event (subtract TAB_H)
+                        self.game_screen.refresh_labels()
+                        self.settings_screen.refresh_labels()
+                        self.tutorial_screen.refresh_labels()
+                    # Tab bar
+                    if self.handle_tabs(event):
+                        continue
                     ev_offset = self._offset_event(event, 0, -self.TAB_H)
-                    self.mode_screen.handle(ev_offset)
+                    # Route to appropriate screen based on active tab
+                    if self.tab == "settings":
+                        self.settings_screen.handle(ev_offset)
+                    elif self.tab == "learn":
+                        res = self.tutorial_screen.handle(ev_offset)
+                        if res == "exit":
+                            self.tab = "game"
+                    else:
+                        # Mode selection screen
+                        self.mode_screen.handle(ev_offset)
                     if self.mode_screen.result:
                         r = self.mode_screen.result
                         self.mode_screen.result = None
@@ -2638,7 +2686,18 @@ class App:
                 self.screen.fill(C["bg"])
                 self.draw_tabs()
                 sub = pygame.Surface((self.W, self.H - self.TAB_H))
-                self.mode_screen.draw(sub)
+                # In mode screen: tab bar shows settings/learn tabs
+                # If user clicked one of those tabs, show that screen
+                if self.tab == "settings":
+                    self.settings_screen.locked = False
+                    self.settings_screen.draw(sub)
+                elif self.tab == "learn":
+                    tut_result = None
+                    # Tutorial events already handled via ev_offset above
+                    self.tutorial_screen.draw(sub)
+                else:
+                    self.tab = "game"  # reset to game (= mode screen view)
+                    self.mode_screen.draw(sub)
                 self.screen.blit(sub, (0, self.TAB_H))
                 pygame.display.flip()
                 continue
