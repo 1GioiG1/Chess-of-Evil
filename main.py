@@ -1788,6 +1788,7 @@ class GameScreen:
         self._bot_delay = 0.0      # time when bot was scheduled
         # LAN session
         self.lan: LanSession | None = None
+        self._request_mode_screen = False
 
     def new_game(self):
         self.gs = GameState()
@@ -2219,9 +2220,8 @@ class GameScreen:
                 if self.lan and self.lan.connected:
                     self.lan.send({"type":"end_turn"})
         if self.btn_new.clicked(event):
-            self.new_game()
-            if self.lan and self.lan.connected:
-                self.lan.send({"type":"new_game"})
+            # Signal App to show mode screen
+            self._request_mode_screen = True
         for btn, t in self.res_buttons:
             if btn.clicked(event):
                 gs.resurrect(t)
@@ -2599,11 +2599,19 @@ class App:
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         running = False; break
+                    if event.type == pygame.VIDEORESIZE:
+                        self.W = max(event.w, self.MIN_W)
+                        self.H = max(event.h, self.MIN_H)
+                        self.screen = pygame.display.set_mode((self.W, self.H), pygame.RESIZABLE)
+                        clear_piece_cache()
+                    # Lang button (in tab bar, full screen coords)
                     if event.type == pygame.MOUSEMOTION:
                         self.btn_lang.update_hover(event.pos)
                     if self.btn_lang.clicked(event):
                         LANG = "en" if LANG == "ru" else "ru"
-                    self.mode_screen.handle(event)
+                    # Mode screen gets offset event (subtract TAB_H)
+                    ev_offset = self._offset_event(event, 0, -self.TAB_H)
+                    self.mode_screen.handle(ev_offset)
                     if self.mode_screen.result:
                         r = self.mode_screen.result
                         self.mode_screen.result = None
@@ -2616,10 +2624,9 @@ class App:
                             self.game_screen.bot_difficulty = r["difficulty"]
                             self.game_screen.lan = None
                         elif r["mode"] == "lan":
-                            sess: LanSession = r["session"]
+                            sess = r["session"]
                             self.game_screen.lan = sess
                             self.game_screen.bot_enabled = False
-                            # Set player color
                             if sess.role == NetworkRole.HOST:
                                 sess.my_color = "W"
                             else:
@@ -2629,10 +2636,10 @@ class App:
                         self.tab = "game"
 
                 self.screen.fill(C["bg"])
+                self.draw_tabs()
                 sub = pygame.Surface((self.W, self.H - self.TAB_H))
                 self.mode_screen.draw(sub)
                 self.screen.blit(sub, (0, self.TAB_H))
-                self.draw_tabs()
                 pygame.display.flip()
                 continue
 
@@ -2659,10 +2666,6 @@ class App:
                 ev = self._offset_event(event, 0, -self.TAB_H)
                 if self.tab == "game":
                     self.game_screen.handle(ev)
-                    # Show mode screen when New Game clicked if game is over or not started
-                    if (self.game_screen.gs.over and
-                            not self.game_screen.gs.game_started):
-                        self.show_mode_screen = True
                 elif self.tab == "settings":
                     self.settings_screen.handle(ev)
                 elif self.tab == "learn":
@@ -2673,11 +2676,12 @@ class App:
             # Bot / LAN tick (outside event loop, called every frame)
             if self.tab == "game" and not self.show_mode_screen:
                 self.game_screen.tick()
-                # If player clicks New Game button → return to mode screen
-                if (not self.game_screen.gs.game_started
-                        and not self.game_screen.gs.over
-                        and self.game_screen.dice_vals == (0, 0)):
-                    pass  # just started, ok
+                # New Game button was clicked → show mode screen
+                if self.game_screen._request_mode_screen:
+                    self.game_screen._request_mode_screen = False
+                    self.show_mode_screen = True
+                    self.mode_screen.lan_state = "idle"
+                    self.mode_screen.result = None
 
             self.screen.fill(C["bg"])
             self.draw_tabs()
