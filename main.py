@@ -847,9 +847,22 @@ def piece_surface(piece_char, size):
     if key in _piece_cache:
         return _piece_cache[key]
     t = tp(piece_char)
-    glyph = PIECE_GLYPH[t]
     is_w = is_white(piece_char)
-    fill = C["piece_w"] if is_w else C["piece_b"]
+
+    # ── Try PNG pieces first (assets/pieces/<W|B><type>.png) ──
+    png_path = resource_path(f"assets/pieces/{'W' if is_w else 'B'}{t}.png")
+    if os.path.exists(png_path):
+        try:
+            img = pygame.image.load(png_path).convert_alpha()
+            img = pygame.transform.smoothscale(img, (size, size))
+            _piece_cache[key] = img
+            return img
+        except Exception:
+            pass
+
+    # ── Unicode glyph fallback ─────────────────────────────────
+    glyph = PIECE_GLYPH[t]
+    fill   = C["piece_w"] if is_w else C["piece_b"]
     outline = C["piece_w_outline"] if is_w else C["piece_b_outline"]
 
     if size not in _symbol_font_cache:
@@ -860,15 +873,24 @@ def piece_surface(piece_char, size):
             _symbol_font_cache[size] = pygame.font.SysFont("segoeuisymbol,dejavusans", size)
     font = _symbol_font_cache[size]
 
-    surf = pygame.Surface((size + 8, size + 8), pygame.SRCALPHA)
+    pad = 3
+    total = size + pad * 2 + 4
+    surf = pygame.Surface((total, total), pygame.SRCALPHA)
+
     outline_surf = font.render(glyph, True, outline)
-    fill_surf = font.render(glyph, True, fill)
-    pad = 2
+    fill_surf    = font.render(glyph, True, fill)
+
+    # Centre the glyph properly in the surface
+    gw, gh = fill_surf.get_size()
+    ox = (total - gw) // 2
+    oy = (total - gh) // 2
+
     for dx in range(-pad, pad + 1):
         for dy in range(-pad, pad + 1):
             if dx == 0 and dy == 0: continue
-            surf.blit(outline_surf, (4 + dx, 4 + dy))
-    surf.blit(fill_surf, (4, 4))
+            surf.blit(outline_surf, (ox + dx, oy + dy))
+    surf.blit(fill_surf, (ox, oy))
+
     _piece_cache[key] = surf
     return surf
 
@@ -1966,29 +1988,31 @@ class GameScreen:
                 psize = int(sq * 0.74)
                 cx, cy = rect.centerx, rect.centery
 
-                # Shadow: flat ellipse at bottom of square, centred horizontally
-                shw = int(psize * 0.60); shh = max(3, int(psize * 0.10))
-                shad_surf = pygame.Surface((shw, shh), pygame.SRCALPHA)
-                pygame.draw.ellipse(shad_surf, (0, 0, 0, 55), (0, 0, shw, shh))
-                surf.blit(shad_surf, (cx - shw // 2, rect.bottom - shh - 1))
-
-                # Piece
+                # Draw piece centred on square
                 surf_p = piece_surface(p, psize)
                 pr = surf_p.get_rect(center=(cx, cy))
                 surf.blit(surf_p, pr)
+
+                # Shadow: small ellipse just below the piece, same centre x
+                shw = max(4, int(psize * 0.52))
+                shh = max(2, int(psize * 0.08))
+                shad = pygame.Surface((shw + 2, shh + 2), pygame.SRCALPHA)
+                pygame.draw.ellipse(shad, (0, 0, 0, 50), (1, 1, shw, shh))
+                surf.blit(shad, (cx - shw // 2 - 1, pr.bottom - shh - 2))
 
         # ── Animated sliding piece (drawn on top) ────────────
         if self.anim and not self.anim.is_done():
             ax, ay = self.anim.pos()
             psize = int(sq * 0.74)
-            # Shadow slightly below for "lifted" look
-            shw = int(psize * 0.55); shh = max(3, int(psize * 0.09))
-            shad_surf = pygame.Surface((shw, shh), pygame.SRCALPHA)
-            pygame.draw.ellipse(shad_surf, (0, 0, 0, 40), (0, 0, shw, shh))
-            surf.blit(shad_surf, (int(ax) - shw // 2, int(ay) + psize // 2 - shh))
             surf_p = piece_surface(self.anim.piece, psize)
             pr = surf_p.get_rect(center=(int(ax), int(ay) - 3))
             surf.blit(surf_p, pr)
+            # Shadow at bottom of animated piece
+            shw = max(4, int(psize * 0.46))
+            shh = max(2, int(psize * 0.07))
+            shad = pygame.Surface((shw + 2, shh + 2), pygame.SRCALPHA)
+            pygame.draw.ellipse(shad, (0, 0, 0, 35), (1, 1, shw, shh))
+            surf.blit(shad, (int(ax) - shw // 2 - 1, pr.bottom - shh - 1))
     def _draw_sidebar(self, surf):
         gs = self.gs
         sx = self.sx; sy = self.sy; sw = self.sw_panel
@@ -2346,6 +2370,150 @@ class GameScreen:
         self.btn_new.label  = T("new_game")
 
 
+# ─────────────────────────────────────────
+#  AUTO-UPDATER
+# ─────────────────────────────────────────
+CURRENT_VERSION = "1.0.0"
+GITHUB_REPO = "Gios1q/Chess-of-Evil"   # ваш репозиторий
+
+import urllib.request as _urllib_req
+import subprocess as _subprocess
+import tempfile as _tempfile
+import shutil as _shutil
+
+class UpdateChecker:
+    def __init__(self):
+        self.latest_version: str | None = None
+        self.release_url: str = ""
+        self.asset_url: str = ""         # direct download URL for main.py or .exe
+        self.checked = False
+        self.checking = False
+        self.downloading = False
+        self.download_progress = 0.0     # 0.0 → 1.0
+        self.download_error: str = ""
+        self.ready_to_restart = False
+        self._downloaded_path: str = ""
+        self._thread: threading.Thread | None = None
+
+    def start_check(self):
+        if self.checking or self.checked:
+            return
+        self.checking = True
+        self._thread = threading.Thread(target=self._check, daemon=True)
+        self._thread.start()
+
+    def _check(self):
+        try:
+            api = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+            req = _urllib_req.Request(api, headers={"User-Agent": "ChessOfEvil"})
+            with _urllib_req.urlopen(req, timeout=6) as resp:
+                data = _json.loads(resp.read())
+                self.latest_version = data.get("tag_name", "").lstrip("v")
+                self.release_url = data.get("html_url", "")
+                # Look for main.py asset first, then .exe
+                for asset in data.get("assets", []):
+                    name = asset.get("name", "")
+                    if name == "main.py":
+                        self.asset_url = asset.get("browser_download_url", "")
+                        break
+                if not self.asset_url:
+                    for asset in data.get("assets", []):
+                        name = asset.get("name", "")
+                        if name.endswith(".exe") or name.endswith("_Linux"):
+                            self.asset_url = asset.get("browser_download_url", "")
+                            break
+        except Exception as e:
+            self.latest_version = None
+        finally:
+            self.checked = True
+            self.checking = False
+
+    def update_available(self) -> bool:
+        if not self.latest_version:
+            return False
+        try:
+            cur = tuple(int(x) for x in CURRENT_VERSION.split("."))
+            lat = tuple(int(x) for x in self.latest_version.split("."))
+            return lat > cur
+        except Exception:
+            return False
+
+    def start_download(self):
+        """Start downloading the update in background thread."""
+        if self.downloading or not self.asset_url:
+            return
+        self.downloading = True
+        self.download_progress = 0.0
+        self.download_error = ""
+        t = threading.Thread(target=self._download, daemon=True)
+        t.start()
+
+    def _download(self):
+        try:
+            req = _urllib_req.Request(
+                self.asset_url,
+                headers={"User-Agent": "ChessOfEvil"}
+            )
+            with _urllib_req.urlopen(req, timeout=30) as resp:
+                total = int(resp.headers.get("Content-Length", 0))
+                # Write to temp file
+                suffix = ".py" if self.asset_url.endswith(".py") else \
+                         ".exe" if self.asset_url.endswith(".exe") else ""
+                fd, tmp_path = _tempfile.mkstemp(suffix=suffix)
+                received = 0
+                with os.fdopen(fd, "wb") as f:
+                    while True:
+                        chunk = resp.read(65536)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        received += len(chunk)
+                        if total > 0:
+                            self.download_progress = received / total
+                self._downloaded_path = tmp_path
+                self.download_progress = 1.0
+                self.ready_to_restart = True
+        except Exception as e:
+            self.download_error = str(e)
+        finally:
+            self.downloading = False
+
+    def apply_and_restart(self):
+        """Replace current file and restart the process."""
+        if not self.ready_to_restart or not self._downloaded_path:
+            return
+        try:
+            # Get path of the currently running script / exe
+            if getattr(sys, "frozen", False):
+                # PyInstaller bundle — replace the exe
+                current_exe = sys.executable
+                backup = current_exe + ".bak"
+                _shutil.copy2(current_exe, backup)
+                _shutil.copy2(self._downloaded_path, current_exe)
+                os.remove(self._downloaded_path)
+                # Re-launch
+                _subprocess.Popen([current_exe] + sys.argv[1:])
+                pygame.quit()
+                sys.exit(0)
+            else:
+                # Running as .py — replace main.py
+                current_py = os.path.abspath(__file__)
+                backup = current_py + ".bak"
+                _shutil.copy2(current_py, backup)
+                _shutil.copy2(self._downloaded_path, current_py)
+                os.remove(self._downloaded_path)
+                # Re-launch with same Python
+                _subprocess.Popen([sys.executable, current_py] + sys.argv[1:])
+                pygame.quit()
+                sys.exit(0)
+        except Exception as e:
+            self.download_error = f"Ошибка применения обновления: {e}"
+            self.ready_to_restart = False
+
+
+_updater = UpdateChecker()
+
+
 class ModeScreen:
     """Start screen: choose local, vs bot, or LAN."""
 
@@ -2496,9 +2664,58 @@ class ModeScreen:
             self.lan_error = self.lan_session.error
             self.lan_state = "error"
 
+        # ── Version / Update bar at bottom ─────────────
+        ver_y = sh - 36
+        draw_text(surf, f"v{CURRENT_VERSION}", FONTS["xs"], C["text3"], 14, ver_y + 8, "topleft")
+        self._btn_update = None  # reset each frame
+
+        if _updater.download_error:
+            err_short = _updater.download_error[:60]
+            draw_text(surf, f"✗ {err_short}", FONTS["xs"], C["red2"], cx, ver_y + 8, "midtop")
+
+        elif _updater.ready_to_restart:
+            lbl = "✓  Готово — нажмите для перезапуска" if LANG=="ru" else "✓  Done — click to restart"
+            bw2 = FONTS["med"].size(lbl)[0] + 28
+            btn_r = pygame.Rect(cx - bw2 // 2, ver_y - 2, bw2, 32)
+            draw_rect(surf, (30, 100, 50), btn_r, 6, 2, (60, 200, 100))
+            draw_text(surf, lbl, FONTS["med"], (120, 255, 150), btn_r.centerx, btn_r.centery, "center")
+            self._btn_update = btn_r
+
+        elif _updater.downloading:
+            prog = _updater.download_progress
+            pct = int(prog * 100)
+            lbl = f"⬇  {'Скачивание' if LANG=='ru' else 'Downloading'} {pct}%..."
+            draw_text(surf, lbl, FONTS["sm"], C["text2"], cx, ver_y + 2, "midtop")
+            # Progress bar
+            bar_w2 = 260; bar_h2 = 6
+            bx2 = cx - bar_w2 // 2
+            pygame.draw.rect(surf, C["bg3"], (bx2, ver_y + 22, bar_w2, bar_h2), border_radius=3)
+            pygame.draw.rect(surf, C["accent"], (bx2, ver_y + 22, int(bar_w2 * prog), bar_h2), border_radius=3)
+
+        elif _updater.update_available():
+            lbl = f"⬆  {'Доступна' if LANG=='ru' else 'Update'} v{_updater.latest_version} — {'обновить' if LANG=='ru' else 'update'}"
+            bw2 = FONTS["sm"].size(lbl)[0] + 28
+            btn_u = pygame.Rect(cx - bw2 // 2, ver_y, bw2, 30)
+            draw_rect(surf, (35, 70, 35), btn_u, 6, 1, (70, 150, 70))
+            draw_text(surf, lbl, FONTS["sm"], (130, 220, 130), btn_u.centerx, btn_u.centery, "center")
+            self._btn_update = btn_u
+
+        elif _updater.checking:
+            draw_text(surf, "Проверка обновлений..." if LANG=="ru" else "Checking for updates...",
+                      FONTS["xs"], C["text3"], cx, ver_y + 8, "midtop")
+        elif _updater.checked:
+            draw_text(surf, "✓ Актуальная версия" if LANG=="ru" else "✓ Up to date",
+                      FONTS["xs"], C["text3"], cx, ver_y + 8, "midtop")
+
     def handle(self, event):
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             pos = event.pos
+            # Update button — behaviour depends on state
+            if hasattr(self, "_btn_update") and self._btn_update and self._btn_update.collidepoint(pos):
+                if _updater.ready_to_restart:
+                    _updater.apply_and_restart()   # replace file + restart
+                elif _updater.update_available() and not _updater.downloading:
+                    _updater.start_download()      # begin background download
             # Local play
             if hasattr(self, "_btn_local") and self._btn_local.collidepoint(pos):
                 self.result = {"mode": "local"}
@@ -2550,6 +2767,17 @@ class App:
         pygame.display.set_caption("Chess of Evil")
         self.clock = pygame.time.Clock()
 
+        # Set window icon
+        icon_path = resource_path("assets/icon_256.png")
+        if not os.path.exists(icon_path):
+            icon_path = resource_path("assets/icon_32.png")
+        if os.path.exists(icon_path):
+            try:
+                icon_surf = pygame.image.load(icon_path)
+                pygame.display.set_icon(icon_surf)
+            except Exception:
+                pass
+
         load_fonts()
         clear_piece_cache()
 
@@ -2565,6 +2793,7 @@ class App:
         self.btn_lang = Button((0,0,90,32), "EN / РУ", font=FONTS["sm"],
                                 color=C["bg3"], hover_color=C["btn_hover"])
         self.show_mode_screen = True  # show on first launch
+        _updater.start_check()  # async update check
 
     def _active_tabs(self):
         """Return tabs to show based on current state."""

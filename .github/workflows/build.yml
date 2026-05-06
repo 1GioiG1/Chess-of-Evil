@@ -26,7 +26,7 @@ jobs:
 
       - name: Build .exe with PyInstaller
         run: |
-          pyinstaller --onefile --windowed --name "Chess_of_Evil" --add-data "assets;assets" main.py
+          pyinstaller --onefile --windowed --name "Chess_of_Evil" --add-data "assets;assets" --icon "assets/icon.ico" main.py
 
       - name: Upload .exe as artifact
         uses: actions/upload-artifact@v4
