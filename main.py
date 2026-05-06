@@ -2379,7 +2379,7 @@ class GameScreen:
 # ─────────────────────────────────────────
 #  AUTO-UPDATER
 # ─────────────────────────────────────────
-CURRENT_VERSION = "1.0.0"
+CURRENT_VERSION = "1.9.1"   # обновляй при каждом релизе / update on each release
 GITHUB_REPO = "Gios1q/Chess-of-Evil"   # ваш репозиторий
 
 import urllib.request as _urllib_req
@@ -2438,8 +2438,14 @@ class UpdateChecker:
         if not self.latest_version:
             return False
         try:
-            cur = tuple(int(x) for x in CURRENT_VERSION.split("."))
-            lat = tuple(int(x) for x in self.latest_version.split("."))
+            # Strip any leading 'v', take only digits and dots
+            import re as _re
+            def parse_ver(s):
+                s = s.strip().lstrip("v")
+                parts = _re.findall(r'\d+', s)
+                return tuple(int(x) for x in parts[:3]) if parts else (0,)
+            cur = parse_ver(CURRENT_VERSION)
+            lat = parse_ver(self.latest_version)
             return lat > cur
         except Exception:
             return False

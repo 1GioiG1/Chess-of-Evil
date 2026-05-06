@@ -3,6 +3,8 @@ name: Build Chess of Evil
 on:
   push:
     branches: [ main, master ]
+    tags:
+      - 'v*'
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
@@ -22,7 +24,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pygame pyinstaller
+          pip install pygame pyinstaller pillow
 
       - name: Build .exe with PyInstaller
         run: |
@@ -76,6 +78,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download Windows artifact
         uses: actions/download-artifact@v4
         with:
@@ -94,9 +99,11 @@ jobs:
           files: |
             release/Chess_of_Evil.exe
             release/Chess_of_Evil_Linux
+            main.py
           body: |
             ## Шахматы Зла / Chess of Evil
 
             ### Скачать / Download
             - **Windows**: `Chess_of_Evil.exe`
             - **Linux**: `Chess_of_Evil_Linux`
+            - **Исходный код / Source**: `main.py`
