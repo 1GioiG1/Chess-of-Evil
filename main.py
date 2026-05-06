@@ -572,6 +572,206 @@ class GameState:
         }.get(t, [(row, 4)])
 
 
+# ─────────────────────────────────────────
+#  AI BOT
+# ─────────────────────────────────────────
+
+PIECE_VALUE = {"K": 0, "Q": 9, "R": 5, "B": 3, "N": 3, "P": 1}
+CENTER_BONUS = {
+    (3,3):0.3,(3,4):0.3,(4,3):0.3,(4,4):0.3,
+    (2,3):0.1,(2,4):0.1,(3,2):0.1,(3,5):0.1,
+    (4,2):0.1,(4,5):0.1,(5,3):0.1,(5,4):0.1,
+}
+
+def _eval_board(board, color):
+    """Simple material + position evaluation for `color`."""
+    score = 0.0
+    for r in range(8):
+        for c in range(8):
+            p = board[r][c]
+            if not p: continue
+            val = PIECE_VALUE.get(tp(p), 0)
+            bonus = CENTER_BONUS.get((r, c), 0)
+            # Pawn advancement bonus
+            if tp(p) == "P":
+                adv = (6 - r) if is_white(p) else (r - 1)
+                bonus += adv * 0.05
+            sign = 1 if pc(p) == color else -1
+            score += sign * (val + bonus)
+    return score
+
+def bot_pick_move(gs, difficulty="medium"):
+    """
+    Returns (fr, fc, tr, tc, sp) or None.
+    difficulty: "easy" | "medium" | "hard"
+    """
+    import random as _rnd
+
+    color = gs.turn
+    # Gather all legal moves for all affordable pieces
+    candidates = []
+    for r in range(8):
+        for c in range(8):
+            if gs.can_select(r, c):
+                for mv in legal_moves_for(gs.board, r, c, gs.ep, gs.castling, color):
+                    candidates.append((r, c) + mv)
+
+    if not candidates:
+        return None
+
+    if difficulty == "easy":
+        return _rnd.choice(candidates)
+
+    # Score each candidate move
+    def score_move(mv):
+        fr, fc, tr, tc, sp = mv
+        b2, cap = apply_raw(gs.board, fr, fc, tr, tc, sp)
+        base = _eval_board(b2, color)
+        # Penalise moving into danger
+        if attacked_by(b2, tr, tc, opp(color), gs.ep, gs.castling):
+            base -= PIECE_VALUE.get(tp(gs.board[fr][fc]), 0) * 0.8
+        # Bonus for checks
+        if in_check(b2, opp(color), gs.ep, gs.castling):
+            base += 0.5
+        return base
+
+    scored = [(score_move(mv), mv) for mv in candidates]
+    scored.sort(key=lambda x: -x[0])
+
+    if difficulty == "medium":
+        # Pick from top-3 randomly to add variation
+        top = scored[:min(3, len(scored))]
+        return _rnd.choice(top)[1]
+
+    # Hard: deterministic best move (top-1 with tiny noise)
+    noise = [(s + _rnd.uniform(0, 0.01), mv) for s, mv in scored]
+    noise.sort(key=lambda x: -x[0])
+    return noise[0][1]
+
+
+# ─────────────────────────────────────────
+#  LAN NETWORKING
+# ─────────────────────────────────────────
+import socket, threading, json as _json, queue as _queue
+
+class NetworkRole:
+    HOST = "host"
+    CLIENT = "client"
+    NONE = "none"
+
+class LanSession:
+    PORT = 47832
+    MAGIC = b"COE1"
+
+    def __init__(self):
+        self.role = NetworkRole.NONE
+        self.sock: socket.socket | None = None
+        self.conn: socket.socket | None = None
+        self.in_q: _queue.Queue = _queue.Queue()
+        self.out_q: _queue.Queue = _queue.Queue()
+        self.connected = False
+        self.error: str = ""
+        self.my_color: str = "W"   # host=W, client=B
+        self._thread: threading.Thread | None = None
+
+    def start_host(self):
+        self.role = NetworkRole.HOST
+        self.my_color = "W"
+        self.error = ""
+        self._thread = threading.Thread(target=self._host_thread, daemon=True)
+        self._thread.start()
+
+    def start_client(self, host_ip: str):
+        self.role = NetworkRole.CLIENT
+        self.my_color = "B"
+        self.error = ""
+        self._thread = threading.Thread(target=self._client_thread,
+                                        args=(host_ip,), daemon=True)
+        self._thread.start()
+
+    def _host_thread(self):
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.sock.bind(("", self.PORT))
+            self.sock.listen(1)
+            self.conn, _ = self.sock.accept()
+            self.conn.send(self.MAGIC)
+            self.connected = True
+            self._io_loop(self.conn)
+        except Exception as e:
+            self.error = str(e)
+            self.connected = False
+
+    def _client_thread(self, host_ip):
+        try:
+            self.conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.conn.connect((host_ip, self.PORT))
+            magic = self.conn.recv(4)
+            if magic != self.MAGIC:
+                raise ValueError("Bad magic")
+            self.connected = True
+            self._io_loop(self.conn)
+        except Exception as e:
+            self.error = str(e)
+            self.connected = False
+
+    def _io_loop(self, conn):
+        conn.settimeout(0.05)
+        buf = b""
+        while True:
+            # Send outgoing
+            while not self.out_q.empty():
+                msg = self.out_q.get_nowait()
+                data = _json.dumps(msg).encode() + b"\n"
+                try:
+                    conn.sendall(data)
+                except Exception:
+                    self.connected = False; return
+            # Receive incoming
+            try:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    self.connected = False; return
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    try:
+                        self.in_q.put(_json.loads(line))
+                    except Exception:
+                        pass
+            except socket.timeout:
+                pass
+            except Exception:
+                self.connected = False; return
+
+    def send(self, msg: dict):
+        self.out_q.put(msg)
+
+    def poll(self) -> dict | None:
+        if not self.in_q.empty():
+            return self.in_q.get_nowait()
+        return None
+
+    def get_local_ip(self) -> str:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            return "127.0.0.1"
+
+    def close(self):
+        self.connected = False
+        for s in [self.conn, self.sock]:
+            if s:
+                try: s.close()
+                except Exception: pass
+        self.conn = None; self.sock = None
+
+
 FONTS = {}
 
 def get_font_path():
@@ -750,14 +950,14 @@ def draw_board_frame(surf, bx, by, bsize, sq):
         draw_text(surf, lbl, font, (180, 140, 90), bx + bsize + 3, ry, "midleft")
 
 
-def draw_piece_shadow(surf, cx, cy, psize):
-    """Draw a soft oval shadow centred under a piece."""
-    sw = int(psize * 0.7)
-    sh = int(psize * 0.18)
-    if sw < 4 or sh < 2: return
-    shad = pygame.Surface((sw, sh), pygame.SRCALPHA)
-    pygame.draw.ellipse(shad, (0, 0, 0, 55), (0, 0, sw, sh))
-    surf.blit(shad, (cx - sw // 2, cy - sh // 2))
+def draw_piece_shadow(surf, cx, bottom_y, psize):
+    """Draw a soft oval shadow at the bottom of a piece."""
+    sw = int(psize * 0.65)
+    sh = max(4, int(psize * 0.12))
+    if sw < 4: return
+    shad = pygame.Surface((sw + 4, sh + 4), pygame.SRCALPHA)
+    pygame.draw.ellipse(shad, (0, 0, 0, 50), (2, 2, sw, sh))
+    surf.blit(shad, (cx - sw // 2 - 2, bottom_y - sh))
 
 
 class Button:
@@ -801,11 +1001,17 @@ class Spinner:
         self._layout()
 
     def _layout(self):
-        bw = max(28, self.rect.height)
+        bw = 32  # fixed button width
+        # Ensure there's at least 40px for the value in the middle
+        min_total = bw * 2 + 40
+        if self.rect.width < min_total:
+            # Expand rect to fit
+            extra = min_total - self.rect.width
+            self.rect.inflate_ip(extra, 0)
         self.btn_minus = pygame.Rect(self.rect.x, self.rect.y, bw, self.rect.height)
         self.btn_plus  = pygame.Rect(self.rect.right - bw, self.rect.y, bw, self.rect.height)
-        self.val_rect  = pygame.Rect(self.rect.x + bw, self.rect.y,
-                                     self.rect.width - 2*bw, self.rect.height)
+        self.val_rect  = pygame.Rect(self.rect.x + bw + 2, self.rect.y,
+                                     self.rect.width - 2 * bw - 4, self.rect.height)
 
     def set_rect(self, rect):
         self.rect = pygame.Rect(rect); self._layout()
@@ -1065,19 +1271,27 @@ class SettingsScreen:
         keys = ["max_actions","crit_ap","fail_penalty","castle_cost"]
         for k, (lbl, hint_key) in zip(keys, labels_hints):
             sp = self.spinners_global[k]
-            row_top = sp.rect.top - 28   # spinner is 28px below row top
+            row_top = sp.rect.top - 29
+            # Available width for label/hint = space before spinner
+            avail_w = sp.rect.left - self._x_global_label - 12
             draw_text(content, lbl, FONTS["med"], C["text"],
                       self._x_global_label, row_top + 2, "topleft")
-            draw_text(content, T(hint_key), FONTS["xs"], C["text3"],
-                      self._x_global_label, row_top + 20, "topleft")
+            hint_lines = wrap_text(T(hint_key), FONTS["xs"], avail_w)
+            for j, line in enumerate(hint_lines[:2]):
+                draw_text(content, line, FONTS["xs"], C["text3"],
+                          self._x_global_label, row_top + 20 + j * 13, "topleft")
             sp.draw(content)
 
         # En passant toggle
         ep_lbl_col = C["text3"] if self.locked else C["text"]
+        ep_sp = self.ep_toggle
+        avail_w_ep = ep_sp.rect.left - self._x_global_label - 12
         draw_text(content, T("allow_ep"), FONTS["med"], ep_lbl_col,
                   self._x_global_label, self._ep_y + 2, "topleft")
-        draw_text(content, T("hint_ep"), FONTS["xs"], C["text3"],
-                  self._x_global_label, self._ep_y + 20, "topleft")
+        hint_ep_lines = wrap_text(T("hint_ep"), FONTS["xs"], avail_w_ep)
+        for j, line in enumerate(hint_ep_lines[:2]):
+            draw_text(content, line, FONTS["xs"], C["text3"],
+                      self._x_global_label, self._ep_y + 20 + j * 13, "topleft")
         self.ep_toggle.disabled = self.locked
         self.ep_toggle.draw(content)
 
@@ -1091,7 +1305,7 @@ class SettingsScreen:
         if self._flash:
             which, t0 = self._flash
             elapsed = _time.monotonic() - t0
-            FLASH_DUR = 1.5
+            FLASH_DUR = 3.0
             if elapsed < FLASH_DUR:
                 prog = elapsed / FLASH_DUR
                 # Alpha: spike up then fade
@@ -1464,22 +1678,29 @@ class TutorialScreen:
         title, body = steps[self.step]
 
         # Progress bar
-        bar_x, bar_y = 50, 40
-        bar_w = sw - 100
-        pygame.draw.rect(surf, C["bg3"], (bar_x, bar_y, bar_w, 5), border_radius=3)
+        counter_str = f"{self.step+1} / {total}"
+        counter_w = FONTS["sm"].size(counter_str)[0] + 12
+        bar_x, bar_y = 50, 20
+        bar_w = sw - bar_x - counter_w - 16
+
+        # Bar track
+        pygame.draw.rect(surf, C["bg3"], (bar_x, bar_y + 4, bar_w, 4), border_radius=2)
         prog = int(bar_w * (self.step + 1) / total)
-        pygame.draw.rect(surf, C["accent"], (bar_x, bar_y, prog, 5), border_radius=3)
-        # Step dots
-        dot_gap = bar_w // total
+        pygame.draw.rect(surf, C["accent"], (bar_x, bar_y + 4, prog, 4), border_radius=2)
+
+        # Step dots — evenly spaced across bar
         for i in range(total):
-            dx = bar_x + i * dot_gap + dot_gap // 2
+            dx = bar_x + int(bar_w * (i + 0.5) / total)
             col = C["accent"] if i <= self.step else C["bg3"]
-            pygame.draw.circle(surf, col, (dx, bar_y + 2), 5 if i == self.step else 3)
-        draw_text(surf, f"{self.step+1} / {total}", FONTS["xs"], C["text3"],
-                  sw - bar_x, bar_y + 2, "midright")
+            r = 5 if i == self.step else 3
+            pygame.draw.circle(surf, col, (dx, bar_y + 6), r)
+
+        # Counter (right side)
+        draw_text(surf, counter_str, FONTS["sm"], C["text3"],
+                  bar_x + bar_w + 10, bar_y + 6, "midleft")
 
         # Layout: left side = text, right side = illustration
-        content_y = bar_y + 22
+        content_y = bar_y + 28
         content_h = sh - content_y - 70
         split = int(sw * 0.52)
 
@@ -1557,8 +1778,16 @@ class GameScreen:
         self.sx = self.sy = self.sw_panel = 0
         # Animation state
         self.anim: PieceAnim | None = None
-        self._last_move = None   # (fr, fc, tr, tc) for trail highlight
+        self._last_move = None
         self._frame_time = 0.0
+        # Bot settings
+        self.bot_enabled = False
+        self.bot_color = "B"      # bot plays as black by default
+        self.bot_difficulty = "medium"
+        self._bot_pending = False  # waiting to fire bot move
+        self._bot_delay = 0.0      # time when bot was scheduled
+        # LAN session
+        self.lan: LanSession | None = None
 
     def new_game(self):
         self.gs = GameState()
@@ -1566,6 +1795,7 @@ class GameScreen:
         self.dice_vals = (0, 0)
         self.anim = None
         self._last_move = None
+        self._bot_pending = False
 
     def _layout(self, w, h):
         side_w = 296
@@ -1735,9 +1965,8 @@ class GameScreen:
                 psize = int(sq * 0.74)
                 cx, cy = rect.centerx, rect.centery
 
-                # Shadow - drawn at bottom edge of piece
-                shadow_cy = rect.bottom - int(psize * 0.08)
-                draw_piece_shadow(surf, cx, shadow_cy, psize)
+                # Shadow at bottom of square
+                draw_piece_shadow(surf, cx, rect.bottom - 2, psize)
 
                 # Piece
                 surf_p = piece_surface(p, psize)
@@ -1748,8 +1977,7 @@ class GameScreen:
         if self.anim and not self.anim.is_done():
             ax, ay = self.anim.pos()
             psize = int(sq * 0.74)
-            # Shadow slightly below centre for lifted piece effect
-            draw_piece_shadow(surf, int(ax), int(ay) + psize // 2, psize)
+            draw_piece_shadow(surf, int(ax), int(ay) + psize // 2 + 4, psize)
             surf_p = piece_surface(self.anim.piece, psize)
             pr = surf_p.get_rect(center=(int(ax), int(ay) - 4))
 
@@ -1967,25 +2195,333 @@ class GameScreen:
                         return
                     gs.sel = None; gs.legal = []
                 if gs.can_select(r, c):
-                    gs.sel = (r, c)
-                    gs.legal = legal_moves_for(gs.board, r, c, gs.ep, gs.castling, gs.turn)
+                    # Block human input if it's the bot's or remote player's turn
+                    is_bot_turn = self.bot_enabled and gs.turn == self.bot_color
+                    is_lan_remote = (self.lan and self.lan.connected
+                                     and gs.turn != self.lan.my_color)
+                    if not is_bot_turn and not is_lan_remote:
+                        gs.sel = (r, c)
+                        gs.legal = legal_moves_for(gs.board, r, c, gs.ep, gs.castling, gs.turn)
                 return
 
-        if self.btn_roll.clicked(event):
-            d1, d2 = gs.roll()
-            if d1: self.dice_vals = (d1, d2)
-        if self.btn_end.clicked(event):
-            gs.end_turn()
+        is_bot_turn = self.bot_enabled and gs.turn == self.bot_color
+        is_lan_remote = (self.lan and self.lan.connected
+                         and gs.turn != self.lan.my_color)
+        if not is_bot_turn and not is_lan_remote:
+            if self.btn_roll.clicked(event):
+                d1, d2 = gs.roll()
+                if d1:
+                    self.dice_vals = (d1, d2)
+                    if self.lan and self.lan.connected:
+                        self.lan.send({"type":"roll","d1":d1,"d2":d2})
+            if self.btn_end.clicked(event):
+                gs.end_turn()
+                if self.lan and self.lan.connected:
+                    self.lan.send({"type":"end_turn"})
         if self.btn_new.clicked(event):
             self.new_game()
+            if self.lan and self.lan.connected:
+                self.lan.send({"type":"new_game"})
         for btn, t in self.res_buttons:
             if btn.clicked(event):
                 gs.resurrect(t)
+                if self.lan and self.lan.connected:
+                    self.lan.send({"type":"resurrect","piece":t})
+
+    def tick(self):
+        """Called every frame. Handles bot moves and LAN messages."""
+        gs = self.gs
+
+        # ── LAN receive ───────────────────────────────────────
+        if self.lan and self.lan.connected:
+            msg = self.lan.poll()
+            if msg:
+                mtype = msg.get("type")
+                if mtype == "move":
+                    fr,fc,tr,tc,sp = msg["fr"],msg["fc"],msg["tr"],msg["tc"],msg.get("sp")
+                    p = gs.board[fr][fc]
+                    if p:
+                        sq = self.sq
+                        self.anim = PieceAnim(p,
+                            self.bx+fc*sq+sq//2, self.by+fr*sq+sq//2,
+                            self.bx+tc*sq+sq//2, self.by+tr*sq+sq//2)
+                    self._last_move = (fr,fc,tr,tc)
+                    gs.execute_move(fr,fc,tr,tc,sp)
+                elif mtype == "roll":
+                    d1,d2 = msg["d1"],msg["d2"]
+                    gs.crit = False; gs.crit_key = None; gs.crit_used = False
+                    s = d1 + d2
+                    if s == 12:
+                        gs.crit = True; gs.od[gs.turn] = settings["crit_ap"]
+                    elif s == 2:
+                        gs.od[gs.turn] = max(0, s - settings["fail_penalty"])
+                    else:
+                        gs.od[gs.turn] = s
+                    gs.rolled = True; gs.moved_pieces = {}; gs.act_used = 0
+                    gs.phase = gs.detect_phase()
+                    gs.check_start_of_turn()
+                    self.dice_vals = (d1, d2)
+                elif mtype == "end_turn":
+                    gs.end_turn()
+                elif mtype == "new_game":
+                    self.new_game()
+                elif mtype == "promo":
+                    gs.promote(msg["piece"])
+                elif mtype == "resurrect":
+                    gs.resurrect(msg["piece"])
+
+        # ── Bot tick ─────────────────────────────────────────
+        if not self.bot_enabled or gs.over or gs.promo_at:
+            return
+        if gs.turn != self.bot_color:
+            self._bot_pending = False
+            return
+
+        if not gs.rolled:
+            # Bot rolls dice
+            d1, d2 = gs.roll()
+            if d1: self.dice_vals = (d1, d2)
+            self._bot_delay = _time.monotonic() + 0.4
+            self._bot_pending = True
+            return
+
+        if self._bot_pending and _time.monotonic() < self._bot_delay:
+            return   # wait for delay
+
+        # Bot makes a move
+        mv = bot_pick_move(gs, self.bot_difficulty)
+        if mv:
+            fr, fc, tr, tc, sp = mv
+            p = gs.board[fr][fc]
+            if p:
+                sq = self.sq
+                self.anim = PieceAnim(p,
+                    self.bx+fc*sq+sq//2, self.by+fr*sq+sq//2,
+                    self.bx+tc*sq+sq//2, self.by+tr*sq+sq//2)
+            self._last_move = (fr, fc, tr, tc)
+            gs.execute_move(fr, fc, tr, tc, sp)
+            # If bot used all actions or ran out of AP, end turn
+            if (gs.act_used >= settings["max_actions"] or
+                    not any(gs.can_select(r2, c2)
+                            for r2 in range(8) for c2 in range(8))):
+                self._bot_delay = _time.monotonic() + 0.5
+                self._bot_pending = True
+                # Schedule end turn in next tick
+                self._end_turn_after = self._bot_delay
+            else:
+                self._bot_delay = _time.monotonic() + 0.35
+                self._bot_pending = True
+        else:
+            # No move available, end turn
+            gs.end_turn()
+            self._bot_pending = False
+
+        # Check if bot should end turn
+        if hasattr(self, "_end_turn_after") and _time.monotonic() >= self._end_turn_after:
+            if gs.rolled and gs.turn == self.bot_color:
+                gs.end_turn()
+            del self._end_turn_after
 
     def refresh_labels(self):
         self.btn_roll.label = T("roll_dice")
         self.btn_end.label  = T("end_turn")
         self.btn_new.label  = T("new_game")
+
+
+class ModeScreen:
+    """Start screen: choose local, vs bot, or LAN."""
+
+    DIFF_LABELS = {"easy": ("Простой","Easy"), "medium": ("Средний","Medium"), "hard": ("Сложный","Hard")}
+
+    def __init__(self):
+        self.lan_session: LanSession | None = None
+        self.lan_state = "idle"   # idle | hosting | connecting | connected | error
+        self.lan_ip_input = ""
+        self.lan_my_ip = ""
+        self.lan_error = ""
+        self.result = None          # set when user picks a mode
+        self.bot_difficulty = "medium"
+        self._input_active = False
+        self._cursor_blink = 0.0
+
+    def draw(self, surf):
+        sw, sh = surf.get_width(), surf.get_height()
+        surf.fill(C["bg"])
+        # Gradient
+        for yy in range(0, sh, 4):
+            t = yy / sh
+            pygame.draw.line(surf, (int(18+t*8), int(18+t*5), int(24+t*14)), (0,yy),(sw,yy))
+
+        cx = sw // 2
+        # Title
+        draw_text(surf, T("title"), FONTS["big"], C["gold2"], cx, 40, "midtop")
+        pygame.draw.line(surf, C["border"], (cx-200, 76), (cx+200, 76), 1)
+
+        card_w = min(sw - 80, 780)
+        card_x = cx - card_w // 2
+
+        # ── Local 2-player ─────────────────────────────
+        section_y = 96
+        draw_rect(surf, C["panel"], (card_x, section_y, card_w, 70), 10, 1, C["border"])
+        lbl = "Два игрока за одним экраном" if LANG=="ru" else "Local 2-Player"
+        draw_text(surf, lbl, FONTS["med"], C["text"], card_x+20, section_y+14)
+        sub = "Оба игрока на этом компьютере" if LANG=="ru" else "Both players on this computer"
+        draw_text(surf, sub, FONTS["sm"], C["text3"], card_x+20, section_y+36)
+        btn_local = pygame.Rect(card_x + card_w - 140, section_y+16, 120, 36)
+        draw_rect(surf, C["accent2"], btn_local, 8)
+        lbl_s = "Играть" if LANG=="ru" else "Play"
+        draw_text(surf, lbl_s, FONTS["med"], C["text"], btn_local.centerx, btn_local.centery, "center")
+        self._btn_local = btn_local
+
+        # ── vs Bot ─────────────────────────────────────
+        section_y = 186
+        draw_rect(surf, C["panel"], (card_x, section_y, card_w, 100), 10, 1, C["border"])
+        lbl2 = "Против бота" if LANG=="ru" else "vs Bot"
+        draw_text(surf, lbl2, FONTS["med"], C["text"], card_x+20, section_y+14)
+        sub2 = "Сложность:" if LANG=="ru" else "Difficulty:"
+        draw_text(surf, sub2, FONTS["sm"], C["text3"], card_x+20, section_y+38)
+
+        # Difficulty buttons
+        self._btn_diffs = {}
+        diffs = ["easy", "medium", "hard"]
+        for i, d in enumerate(diffs):
+            lbl_d = self.DIFF_LABELS[d][0 if LANG=="ru" else 1]
+            bx2 = card_x + 140 + i * 130
+            br = pygame.Rect(bx2, section_y+32, 120, 30)
+            active = d == self.bot_difficulty
+            draw_rect(surf, C["accent2"] if active else C["btn"], br, 6)
+            draw_text(surf, lbl_d, FONTS["sm"],
+                      C["text"] if active else C["text2"],
+                      br.centerx, br.centery, "center")
+            self._btn_diffs[d] = br
+
+        btn_bot = pygame.Rect(card_x + card_w - 140, section_y+32, 120, 36)
+        draw_rect(surf, C["accent2"], btn_bot, 8)
+        draw_text(surf, lbl_s, FONTS["med"], C["text"], btn_bot.centerx, btn_bot.centery, "center")
+        self._btn_bot = btn_bot
+
+        # ── LAN ────────────────────────────────────────
+        section_y = 306
+        lan_h = 160
+        draw_rect(surf, C["panel"], (card_x, section_y, card_w, lan_h), 10, 1, C["border"])
+        lbl3 = "Сетевая игра (LAN / Radmin)" if LANG=="ru" else "Network Play (LAN / Radmin)"
+        draw_text(surf, lbl3, FONTS["med"], C["text"], card_x+20, section_y+14)
+
+        if self.lan_state == "idle":
+            # Host button
+            btn_host = pygame.Rect(card_x+20, section_y+44, 180, 36)
+            draw_rect(surf, C["btn"], btn_host, 8, 1, C["border2"])
+            host_lbl = "Создать игру" if LANG=="ru" else "Host Game"
+            draw_text(surf, host_lbl, FONTS["med"], C["text2"], btn_host.centerx, btn_host.centery, "center")
+            self._btn_host = btn_host
+
+            # IP input + connect
+            ip_lbl = "IP хоста:" if LANG=="ru" else "Host IP:"
+            draw_text(surf, ip_lbl, FONTS["sm"], C["text3"], card_x+220, section_y+50)
+            ip_rect = pygame.Rect(card_x+310, section_y+44, 180, 32)
+            border_c = C["accent"] if self._input_active else C["inp_border"]
+            draw_rect(surf, C["inp_bg"], ip_rect, 6, 2, border_c)
+            cursor = "|" if (self._input_active and int(_time.monotonic()*2) % 2) else ""
+            draw_text(surf, self.lan_ip_input + cursor, FONTS["sm"], C["text"],
+                      ip_rect.x+8, ip_rect.centery, "midleft")
+            self._ip_rect = ip_rect
+
+            btn_conn = pygame.Rect(card_x+500, section_y+44, 130, 36)
+            draw_rect(surf, C["accent2"], btn_conn, 8)
+            conn_lbl = "Подключиться" if LANG=="ru" else "Connect"
+            draw_text(surf, conn_lbl, FONTS["sm"], C["text"], btn_conn.centerx, btn_conn.centery, "center")
+            self._btn_conn = btn_conn
+
+            sub3 = "Убедитесь что оба в одной сети (или Radmin VPN)" if LANG=="ru" else \
+                   "Both players must be on the same network (or Radmin VPN)"
+            draw_text(surf, sub3, FONTS["xs"], C["text3"], card_x+20, section_y+94)
+
+        elif self.lan_state in ("hosting", "connecting"):
+            spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(_time.monotonic()*8) % 10]
+            if self.lan_state == "hosting":
+                my_ip = self.lan_session.get_local_ip() if self.lan_session else "..."
+                msg = f"{spinner}  Ожидание подключения...  IP: {my_ip}" if LANG=="ru" else \
+                      f"{spinner}  Waiting for opponent...  Your IP: {my_ip}"
+            else:
+                msg = f"{spinner}  Подключение к {self.lan_ip_input}..." if LANG=="ru" else \
+                      f"{spinner}  Connecting to {self.lan_ip_input}..."
+            draw_text(surf, msg, FONTS["med"], C["text2"], cx, section_y+70, "center")
+            btn_cancel = pygame.Rect(cx-60, section_y+110, 120, 32)
+            draw_rect(surf, C["btn"], btn_cancel, 6)
+            draw_text(surf, "Отмена" if LANG=="ru" else "Cancel", FONTS["sm"], C["text"],
+                      btn_cancel.centerx, btn_cancel.centery, "center")
+            self._btn_cancel = btn_cancel
+
+        elif self.lan_state == "connected":
+            role = "Хост (Белые)" if (self.lan_session and self.lan_session.role == NetworkRole.HOST) else "Гость (Чёрные)"
+            role_en = "Host (White)" if (self.lan_session and self.lan_session.role == NetworkRole.HOST) else "Guest (Black)"
+            msg = f"✓  Соединение установлено!  {role}" if LANG=="ru" else f"✓  Connected!  {role_en}"
+            draw_text(surf, msg, FONTS["med"], (80,200,80), cx, section_y+50, "center")
+            btn_start = pygame.Rect(cx-80, section_y+90, 160, 36)
+            draw_rect(surf, C["accent2"], btn_start, 8)
+            draw_text(surf, "Начать игру" if LANG=="ru" else "Start Game",
+                      FONTS["med"], C["text"], btn_start.centerx, btn_start.centery, "center")
+            self._btn_start_lan = btn_start
+
+        elif self.lan_state == "error":
+            draw_text(surf, f"✗  {self.lan_error}", FONTS["sm"], C["red2"], cx, section_y+50, "center")
+            btn_retry = pygame.Rect(cx-60, section_y+90, 120, 32)
+            draw_rect(surf, C["btn"], btn_retry, 6)
+            draw_text(surf, "Назад" if LANG=="ru" else "Back", FONTS["sm"], C["text"],
+                      btn_retry.centerx, btn_retry.centery, "center")
+            self._btn_cancel = btn_retry
+
+        # Check connection status change
+        if self.lan_session and self.lan_session.connected and self.lan_state in ("hosting","connecting"):
+            self.lan_state = "connected"
+        if self.lan_session and self.lan_session.error and self.lan_state in ("hosting","connecting"):
+            self.lan_error = self.lan_session.error
+            self.lan_state = "error"
+
+    def handle(self, event):
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            pos = event.pos
+            # Local play
+            if hasattr(self, "_btn_local") and self._btn_local.collidepoint(pos):
+                self.result = {"mode": "local"}
+            # Difficulty selection
+            if hasattr(self, "_btn_diffs"):
+                for d, br in self._btn_diffs.items():
+                    if br.collidepoint(pos):
+                        self.bot_difficulty = d
+            # vs Bot
+            if hasattr(self, "_btn_bot") and self._btn_bot.collidepoint(pos):
+                self.result = {"mode": "bot", "difficulty": self.bot_difficulty}
+            # LAN buttons
+            if self.lan_state == "idle":
+                if hasattr(self, "_btn_host") and self._btn_host.collidepoint(pos):
+                    sess = LanSession(); sess.start_host()
+                    self.lan_session = sess; self.lan_state = "hosting"
+                if hasattr(self, "_ip_rect") and self._ip_rect.collidepoint(pos):
+                    self._input_active = True
+                else:
+                    if hasattr(self, "_ip_rect"):
+                        self._input_active = False
+                if hasattr(self, "_btn_conn") and self._btn_conn.collidepoint(pos):
+                    if self.lan_ip_input.strip():
+                        sess = LanSession(); sess.start_client(self.lan_ip_input.strip())
+                        self.lan_session = sess; self.lan_state = "connecting"
+            elif self.lan_state in ("hosting","connecting","error"):
+                if hasattr(self, "_btn_cancel") and self._btn_cancel.collidepoint(pos):
+                    if self.lan_session: self.lan_session.close()
+                    self.lan_session = None; self.lan_state = "idle"; self.lan_error = ""
+            elif self.lan_state == "connected":
+                if hasattr(self, "_btn_start_lan") and self._btn_start_lan.collidepoint(pos):
+                    self.result = {"mode": "lan", "session": self.lan_session}
+
+        if event.type == pygame.KEYDOWN and self._input_active:
+            if event.key == pygame.K_BACKSPACE:
+                self.lan_ip_input = self.lan_ip_input[:-1]
+            elif event.key == pygame.K_RETURN:
+                self._input_active = False
+            elif len(self.lan_ip_input) < 15 and (event.unicode.isdigit() or event.unicode == "."):
+                self.lan_ip_input += event.unicode
+        return None
 
 
 class App:
@@ -2004,12 +2540,13 @@ class App:
         self.tab_label_keys = {"game":"tab_game","settings":"tab_settings","learn":"tab_learn"}
         self.TAB_H = 44
 
-        # Persistent screens — no recreation on resize
         self.game_screen = GameScreen()
         self.settings_screen = SettingsScreen()
         self.tutorial_screen = TutorialScreen()
+        self.mode_screen = ModeScreen()
         self.btn_lang = Button((0,0,90,32), "EN / РУ", font=FONTS["sm"],
                                 color=C["bg3"], hover_color=C["btn_hover"])
+        self.show_mode_screen = True  # show on first launch
 
     def draw_tabs(self):
         surf = self.screen
@@ -2056,6 +2593,49 @@ class App:
         running = True
         while running:
             self.clock.tick(60)
+
+            # ── Mode selection screen ─────────────────────────
+            if self.show_mode_screen:
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        running = False; break
+                    if event.type == pygame.MOUSEMOTION:
+                        self.btn_lang.update_hover(event.pos)
+                    if self.btn_lang.clicked(event):
+                        LANG = "en" if LANG == "ru" else "ru"
+                    self.mode_screen.handle(event)
+                    if self.mode_screen.result:
+                        r = self.mode_screen.result
+                        self.mode_screen.result = None
+                        if r["mode"] == "local":
+                            self.game_screen.bot_enabled = False
+                            self.game_screen.lan = None
+                        elif r["mode"] == "bot":
+                            self.game_screen.bot_enabled = True
+                            self.game_screen.bot_color = "B"
+                            self.game_screen.bot_difficulty = r["difficulty"]
+                            self.game_screen.lan = None
+                        elif r["mode"] == "lan":
+                            sess: LanSession = r["session"]
+                            self.game_screen.lan = sess
+                            self.game_screen.bot_enabled = False
+                            # Set player color
+                            if sess.role == NetworkRole.HOST:
+                                sess.my_color = "W"
+                            else:
+                                sess.my_color = "B"
+                        self.game_screen.new_game()
+                        self.show_mode_screen = False
+                        self.tab = "game"
+
+                self.screen.fill(C["bg"])
+                sub = pygame.Surface((self.W, self.H - self.TAB_H))
+                self.mode_screen.draw(sub)
+                self.screen.blit(sub, (0, self.TAB_H))
+                self.draw_tabs()
+                pygame.display.flip()
+                continue
+
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
@@ -2079,6 +2659,10 @@ class App:
                 ev = self._offset_event(event, 0, -self.TAB_H)
                 if self.tab == "game":
                     self.game_screen.handle(ev)
+                    # Show mode screen when New Game clicked if game is over or not started
+                    if (self.game_screen.gs.over and
+                            not self.game_screen.gs.game_started):
+                        self.show_mode_screen = True
                 elif self.tab == "settings":
                     self.settings_screen.handle(ev)
                 elif self.tab == "learn":
@@ -2086,13 +2670,22 @@ class App:
                     if result == "exit":
                         self.tab = "game"
 
+            # Bot / LAN tick (outside event loop, called every frame)
+            if self.tab == "game" and not self.show_mode_screen:
+                self.game_screen.tick()
+                # If player clicks New Game button → return to mode screen
+                if (not self.game_screen.gs.game_started
+                        and not self.game_screen.gs.over
+                        and self.game_screen.dice_vals == (0, 0)):
+                    pass  # just started, ok
+
             self.screen.fill(C["bg"])
             self.draw_tabs()
             sub_w = self.W
             sub_h = self.H - self.TAB_H
             sub_surf = pygame.Surface((sub_w, sub_h))
-            # Sync settings lock with game state
-            self.settings_screen.locked = self.game_screen.gs.game_started and not self.game_screen.gs.over
+            self.settings_screen.locked = (self.game_screen.gs.game_started
+                                           and not self.game_screen.gs.over)
             if self.tab == "game":
                 self.game_screen.draw(sub_surf)
             elif self.tab == "settings":
@@ -2102,8 +2695,12 @@ class App:
             self.screen.blit(sub_surf, (0, self.TAB_H))
             pygame.display.flip()
 
+        # Cleanup
+        if self.game_screen.lan:
+            self.game_screen.lan.close()
         pygame.quit()
         sys.exit()
+
 
     def _offset_event(self, event, dx, dy):
         if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION):
