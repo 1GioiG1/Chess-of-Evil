@@ -40,6 +40,17 @@ STRINGS = {
         "reset_settings": "Сбросить",
         "global_settings": "Глобальные настройки",
         "piece_settings": "Настройки фигур",
+        "col_move_hint": "Сколько ОД стоит ход этой фигурой",
+        "col_res_hint": "Сколько ОД стоит воскресить эту фигуру в фазе «Столкновение Судеб»",
+        "col_count_hint": "Сколько раз за игру можно воскресить (∞ = без ограничений, 0 = нельзя)",
+        "hint_max_actions": "Сколько раз за ход можно двигать фигуры (независимо от ОД)",
+        "hint_crit": "Сумма ОД при броске 12. По умолчанию = 12",
+        "hint_fail": "Сколько ОД теряется при броске 2. По умолчанию = 1",
+        "hint_castle": "Стоимость рокировки в ОД (обычно = стоимость ладьи)",
+        "allow_ep": "Взятие на проходе",
+        "hint_ep": "Разрешить взятие пешки, прошедшей 2 клетки, соседней пешкой противника",
+        "settings_locked": "Настройки заблокированы во время игры",
+        "settings_lock_hint": "Начните новую игру, чтобы изменить настройки",
         "pieces": {"K":"Король","Q":"Ферзь","R":"Ладья","B":"Слон","N":"Конь","P":"Пешка"},
         "white": "Белые",
         "black": "Чёрные",
@@ -92,6 +103,17 @@ STRINGS = {
         "reset_settings": "Reset",
         "global_settings": "Global Settings",
         "piece_settings": "Piece Settings",
+        "col_move_hint": "AP cost to move this piece",
+        "col_res_hint": "AP cost to resurrect this piece in Clash of Fates phase",
+        "col_count_hint": "How many times per game this piece can be resurrected (∞ = unlimited, 0 = never)",
+        "hint_max_actions": "How many piece moves allowed per turn (regardless of AP)",
+        "hint_crit": "AP gained when rolling 12. Default = 12",
+        "hint_fail": "AP lost when rolling 2. Default = 1",
+        "hint_castle": "AP cost of castling move (usually = rook cost)",
+        "allow_ep": "En Passant",
+        "hint_ep": "Allow capturing a pawn that just moved 2 squares by an adjacent enemy pawn",
+        "settings_locked": "Settings are locked during a game",
+        "settings_lock_hint": "Start a new game to change settings",
         "pieces": {"K":"King","Q":"Queen","R":"Rook","B":"Bishop","N":"Knight","P":"Pawn"},
         "white": "White",
         "black": "Black",
@@ -163,8 +185,10 @@ DEFAULT_SETTINGS = {
     "crit_ap":     12,
     "fail_penalty": 1,
     "castle_cost": 5,
+    "allow_ep":    True,   # En passant toggle
 }
 settings = copy.deepcopy(DEFAULT_SETTINGS)
+
 
 PIECE_GLYPH = {"K":"♚","Q":"♛","R":"♜","B":"♝","N":"♞","P":"♟"}
 PIECE_TYPES = ["K","Q","R","B","N","P"]
@@ -209,7 +233,7 @@ def raw_moves(board, r, c, ep, castling, skip_castle=False):
             tgt = board[nr][nc]
             if tgt and pc(tgt) == enemy:
                 moves.append((nr, nc, None))
-            elif ep and ep == (nr, nc):
+            elif ep and ep == (nr, nc) and settings.get("allow_ep", True):
                 moves.append((nr, nc, "ep"))
 
     if t == "N":
@@ -325,6 +349,9 @@ class GameState:
         self.check_sq = None
         self.log = []
         self.dice = (0, 0)
+        self._clash_triggered = False
+        self.game_started = False   # becomes True after first piece move
+
 
     def add_log(self, msg, color="sys"):
         self.log.insert(0, (msg, color))
@@ -335,7 +362,12 @@ class GameState:
         pieces = all_pieces(self.board)
         w_nk = [x for x in pieces if pc(x[0]) == "W" and tp(x[0]) != "K"]
         b_nk = [x for x in pieces if pc(x[0]) == "B" and tp(x[0]) != "K"]
-        if not w_nk and not b_nk: return "clash"
+        # Clash of Fates: once both sides reach kings-only, stay in clash forever
+        # (even if pieces are resurrected back onto the board)
+        if not w_nk and not b_nk:
+            self._clash_triggered = True
+        if getattr(self, "_clash_triggered", False):
+            return "clash"
         active_nk = w_nk if self.turn == "W" else b_nk
         if not active_nk: return "gambit"
         return "normal"
@@ -371,6 +403,7 @@ class GameState:
         return bool(legal_moves_for(self.board, r, c, self.ep, self.castling, self.turn))
 
     def execute_move(self, fr, fc, tr, tc, sp):
+        self.game_started = True   # lock settings from now on
         p = self.board[fr][fc]
         t = tp(p); color = self.turn
         cost = settings["castle_cost"] if sp in ("ck","cq") else self.move_cost(p, fr, fc)
@@ -486,6 +519,8 @@ class GameState:
         seen = {}
         for t in self.dead[self.turn]:
             if t in seen: continue
+            # Kings cannot be resurrected
+            if t == "K": continue
             max_r = settings["res_count"].get(t, -1)
             if max_r == 0: continue
             used = self.res_counts[self.turn].get(t, 0)
@@ -523,11 +558,12 @@ class GameState:
 
     def _orig_positions(self, p):
         t = tp(p); row = 7 if is_white(p) else 0
+        pawn_row = 6 if is_white(p) else 1
         return {
             "K":[(row,4)],"Q":[(row,3)],
             "R":[(row,0),(row,7)],"B":[(row,2),(row,5)],
             "N":[(row,1),(row,6)],
-            "P":[(row, c) for c in range(8)],
+            "P":[(pawn_row, c) for c in range(8)],
         }.get(t, [(row, 4)])
 
 
@@ -719,6 +755,38 @@ class Spinner:
         return False
 
 
+class Toggle:
+    """ON/OFF toggle switch"""
+    def __init__(self, x, y, value=True):
+        self.value = value
+        self.w, self.h = 48, 26
+        self.rect = pygame.Rect(x, y, self.w, self.h)
+        self.disabled = False
+
+    def set_pos(self, x, y):
+        self.rect = pygame.Rect(x, y, self.w, self.h)
+
+    def draw(self, surf):
+        if self.disabled:
+            bg = C["bg3"] if not self.value else (40, 70, 40)
+            knob_c = C["text3"]
+        else:
+            bg = C["accent2"] if self.value else C["bg3"]
+            knob_c = C["text"] if self.value else C["text2"]
+        pygame.draw.rect(surf, bg, self.rect, border_radius=13)
+        pygame.draw.rect(surf, C["border2"], self.rect, 1, border_radius=13)
+        knob_x = self.rect.right - 15 if self.value else self.rect.left + 3
+        pygame.draw.circle(surf, knob_c, (knob_x + 7, self.rect.centery), 10)
+
+    def handle(self, event):
+        if self.disabled: return False
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if self.rect.collidepoint(event.pos):
+                self.value = not self.value
+                return True
+        return False
+
+
 DIE_DOTS = {
     1: [(0.5,0.5)],
     2: [(0.28,0.28),(0.72,0.72)],
@@ -728,14 +796,24 @@ DIE_DOTS = {
     6: [(0.28,0.22),(0.72,0.22),(0.28,0.5),(0.72,0.5),(0.28,0.78),(0.72,0.78)],
 }
 
-def draw_die(surf, val, rect, crit=False, fail=False):
-    bg = C["die_crit"] if crit else C["die_fail"] if fail else C["die_bg"]
-    border = (80,180,80) if crit else (200,80,80) if fail else C["border2"]
+def draw_die(surf, val, rect, crit=False, fail=False, player_color=None):
+    if crit:
+        bg = C["die_crit"]; border = (80,180,80)
+    elif fail:
+        bg = C["die_fail"]; border = (200,80,80)
+    elif player_color == "W":
+        bg = (55, 55, 70); border = (200, 200, 220)
+    elif player_color == "B":
+        bg = (25, 25, 35); border = (80, 80, 100)
+    else:
+        bg = C["die_bg"]; border = C["border2"]
     draw_rect(surf, bg, rect, 8, 2, border)
     if val < 1 or val > 6:
         draw_text(surf, "?", FONTS["med"], C["text2"], rect.centerx, rect.centery, "center")
         return
-    dot_color = (220,240,200) if crit else (240,180,180) if fail else C["text"]
+    dot_color = (220,240,200) if crit else (240,180,180) if fail else \
+                (240,240,250) if player_color == "W" else \
+                (180,180,200) if player_color == "B" else C["text"]
     r = max(3, rect.width // 10)
     for fx, fy in DIE_DOTS[val]:
         cx = int(rect.x + fx * rect.width)
@@ -749,6 +827,7 @@ class SettingsScreen:
         self.content_h = 0
         self.spinners_piece = {}
         self.spinners_global = {}
+        self.locked = False   # True during active game
         self._build_widgets()
 
     def _build_widgets(self):
@@ -764,6 +843,7 @@ class SettingsScreen:
             "fail_penalty": Spinner((0,0,120,32), settings["fail_penalty"], 0, 5),
             "castle_cost":  Spinner((0,0,120,32), settings["castle_cost"], 1, 30),
         }
+        self.ep_toggle = Toggle(0, 0, settings.get("allow_ep", True))
         self.btn_save = Button((0,0,160,40), T("save_settings"),
                                 color=C["accent2"], hover_color=C["accent"])
         self.btn_reset = Button((0,0,160,40), T("reset_settings"))
@@ -774,7 +854,6 @@ class SettingsScreen:
         max_w = min(880, w - 2 * margin)
         x_start = (w - max_w) // 2
 
-        # 4 columns: piece | move | res_cost | res_count
         col_label = 130
         col_w = (max_w - col_label) // 3
         spinner_w = min(120, col_w - 24)
@@ -793,7 +872,8 @@ class SettingsScreen:
         self._title_y = y
         y += 50
         self._piece_header_y = y
-        y += 32
+        # Header now takes 50px (title + 2 hint lines)
+        y += 50
         row_h = 44
 
         for i, t in enumerate(PIECE_TYPES):
@@ -810,11 +890,19 @@ class SettingsScreen:
 
         x_global_label = x_start + 16
         x_global_spin = x_start + max_w - spinner_w - 16
+        # Global rows are taller (label + hint)
+        global_row_h = 54
         for i, k in enumerate(["max_actions","crit_ap","fail_penalty","castle_cost"]):
-            ry = y + i * row_h
-            self.spinners_global[k].set_rect((x_global_spin, ry, spinner_w, 32))
+            ry = y + i * global_row_h
+            self.spinners_global[k].set_rect((x_global_spin, ry + 18, spinner_w, 32))
         self._x_global_label = x_global_label
-        y += 4 * row_h + 30
+        y += 4 * global_row_h + 12
+
+        # En passant toggle row
+        self._ep_y = y
+        self._ep_toggle_x = x_global_spin + spinner_w - self.ep_toggle.w
+        self.ep_toggle.set_pos(self._ep_toggle_x, y + 2)
+        y += global_row_h + 10
 
         btn_w = 160; btn_gap = 16
         total = 2 * btn_w + btn_gap
@@ -836,16 +924,21 @@ class SettingsScreen:
                   surf.get_width() // 2, self._title_y, "midtop")
 
         draw_text(content, T("piece_settings"), FONTS["med"], C["text2"],
-                  self._x_start + 10, self._piece_header_y - 24, "topleft")
+                  self._x_start + 10, self._piece_header_y - 28, "topleft")
 
         headers = [T("cost_move"), T("cost_res"), T("res_count")]
-        for i, hdr in enumerate(headers):
+        hints = ["col_move_hint", "col_res_hint", "col_count_hint"]
+        for i, (hdr, hint_key) in enumerate(zip(headers, hints)):
             draw_text(content, hdr, FONTS["sm"], C["text2"],
-                      self._col_centers[i], self._piece_header_y + 6, "midtop")
+                      self._col_centers[i], self._piece_header_y + 2, "midtop")
+            hint_lines = wrap_text(T(hint_key), FONTS["xs"], self._spinner_w + 30)
+            for j, line in enumerate(hint_lines[:2]):
+                draw_text(content, line, FONTS["xs"], C["text3"],
+                          self._col_centers[i], self._piece_header_y + 20 + j * 14, "midtop")
 
         row_h = 44
         for i, t in enumerate(PIECE_TYPES):
-            ry = self._piece_header_y + 32 + i * row_h
+            ry = self._piece_header_y + 50 + i * row_h
             draw_text(content, TP(t), FONTS["med"], C["text"],
                       self._x_label, ry + 16, "midleft")
             for kind in ["move","res_cost","res_count"]:
@@ -858,19 +951,50 @@ class SettingsScreen:
         draw_text(content, T("global_settings"), FONTS["med"], C["text2"],
                   self._x_start + 10, self._global_header_y - 8, "topleft")
 
-        labels = [T("max_actions"), T("crit_bonus"), T("fail_penalty"), T("castle_cost_lbl")]
+        labels_hints = [
+            (T("max_actions"), "hint_max_actions"),
+            (T("crit_bonus"),  "hint_crit"),
+            (T("fail_penalty"), "hint_fail"),
+            (T("castle_cost_lbl"), "hint_castle"),
+        ]
         keys = ["max_actions","crit_ap","fail_penalty","castle_cost"]
-        for k, lbl in zip(keys, labels):
+        for k, (lbl, hint_key) in zip(keys, labels_hints):
             sp = self.spinners_global[k]
+            row_top = sp.rect.top - 18
             draw_text(content, lbl, FONTS["med"], C["text"],
-                      self._x_global_label, sp.rect.centery, "midleft")
+                      self._x_global_label, row_top + 2, "topleft")
+            draw_text(content, T(hint_key), FONTS["xs"], C["text3"],
+                      self._x_global_label, row_top + 20, "topleft")
             sp.draw(content)
 
+        # En passant toggle
+        ep_lbl_col = C["text3"] if self.locked else C["text"]
+        draw_text(content, T("allow_ep"), FONTS["med"], ep_lbl_col,
+                  self._x_global_label, self._ep_y + 2, "topleft")
+        draw_text(content, T("hint_ep"), FONTS["xs"], C["text3"],
+                  self._x_global_label, self._ep_y + 20, "topleft")
+        self.ep_toggle.disabled = self.locked
+        self.ep_toggle.draw(content)
+
+        # Save/Reset — disable when locked
+        self.btn_save.disabled = self.locked
+        self.btn_reset.disabled = self.locked
         self.btn_save.draw(content)
         self.btn_reset.draw(content)
 
         surf.fill(C["bg"])
         surf.blit(content, (0, -self.scroll_y))
+
+        # Locked banner (drawn on top of surf, not content)
+        if self.locked:
+            banner_h = 52
+            pygame.draw.rect(surf, (40, 25, 10), (0, 0, surf.get_width(), banner_h))
+            pygame.draw.line(surf, (140, 90, 20), (0, banner_h), (surf.get_width(), banner_h), 2)
+            lock_icon = "🔒 " if False else "⚠  "  # just use text
+            draw_text(surf, T("settings_locked"), FONTS["med"], (220, 160, 50),
+                      surf.get_width() // 2, 10, "midtop")
+            draw_text(surf, T("settings_lock_hint"), FONTS["sm"], (160, 120, 40),
+                      surf.get_width() // 2, 30, "midtop")
 
         # Scrollbar
         if self.content_h > surf.get_height():
@@ -882,6 +1006,8 @@ class SettingsScreen:
             thumb_y = int((self.scroll_y / max_scroll) * (sb_h - thumb_h)) if max_scroll > 0 else 0
             pygame.draw.rect(surf, C["bg3"], (sb_x, 0, sb_w, sb_h), border_radius=3)
             pygame.draw.rect(surf, C["border2"], (sb_x, thumb_y, sb_w, thumb_h), border_radius=3)
+
+
 
     def handle(self, event):
         def offset_event(e):
@@ -896,9 +1022,13 @@ class SettingsScreen:
             self.scroll_y -= event.y * 30
             return None
 
+        if self.locked:
+            return None   # all interactions blocked during game
+
         ev = offset_event(event)
         for sp in list(self.spinners_piece.values()) + list(self.spinners_global.values()):
             sp.handle(ev)
+        self.ep_toggle.handle(ev)
 
         for btn in [self.btn_save, self.btn_reset]:
             if event.type == pygame.MOUSEMOTION:
@@ -917,6 +1047,7 @@ class SettingsScreen:
             settings["res_count"][t] = self.spinners_piece[("res_count", t)].value
         for k in ["max_actions","crit_ap","fail_penalty","castle_cost"]:
             settings[k] = self.spinners_global[k].value
+        settings["allow_ep"] = self.ep_toggle.value
 
     def _reset(self):
         global settings
@@ -1212,8 +1343,9 @@ class GameScreen:
         d1, d2 = self.dice_vals
         crit = d1 + d2 == 12 and d1 > 0
         fail = d1 + d2 == 2 and d1 > 0
-        draw_die(surf, d1, pygame.Rect(dx, dy, die_size, die_size), crit, fail)
-        draw_die(surf, d2, pygame.Rect(dx + die_size + gap, dy, die_size, die_size), crit, fail)
+        pc_ = gs.turn if gs.rolled else None
+        draw_die(surf, d1, pygame.Rect(dx, dy, die_size, die_size), crit, fail, pc_)
+        draw_die(surf, d2, pygame.Rect(dx + die_size + gap, dy, die_size, die_size), crit, fail, pc_)
 
         acts_y = dy + die_size + 10
         if gs.rolled:
@@ -1474,6 +1606,8 @@ class App:
             sub_w = self.W
             sub_h = self.H - self.TAB_H
             sub_surf = pygame.Surface((sub_w, sub_h))
+            # Sync settings lock with game state
+            self.settings_screen.locked = self.game_screen.gs.game_started and not self.game_screen.gs.over
             if self.tab == "game":
                 self.game_screen.draw(sub_surf)
             elif self.tab == "settings":
