@@ -68,6 +68,9 @@ jobs:
           path: release/
           merge-multiple: true
 
+      - name: List files
+        run: ls -la release/
+
       - name: Install requests
         run: pip install requests
 
@@ -76,76 +79,4 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
-        run: |
-          python3 - << 'PYEOF'
-import os, json, time, requests
-
-token = os.environ["GITHUB_TOKEN"]
-repo  = os.environ["GITHUB_REPOSITORY"]
-tag   = os.environ["TAG_NAME"]
-api   = f"https://api.github.com/repos/{repo}"
-
-s = requests.Session()
-s.headers.update({
-    "Authorization": f"Bearer {token}",
-    "Accept": "application/vnd.github+json",
-    "X-GitHub-Api-Version": "2022-11-28",
-})
-
-# 1. Delete existing release if present
-r = s.get(f"{api}/releases/tags/{tag}")
-if r.status_code == 200:
-    rid = r.json()["id"]
-    print(f"Deleting release {rid}...")
-    s.delete(f"{api}/releases/{rid}")
-    time.sleep(2)
-
-# 2. Create release (tag already exists from git push)
-body = f"## Chess of Evil {tag}\n\n- **Windows**: Chess_of_Evil.exe\n- **Linux**: Chess_of_Evil_Linux\n- **Source**: main.py"
-r = s.post(f"{api}/releases", json={
-    "tag_name": tag,
-    "name": f"Chess of Evil {tag}",
-    "body": body,
-    "draft": False,
-    "prerelease": False,
-    "make_latest": "true",
-})
-print(f"Create release: {r.status_code}")
-if r.status_code != 201:
-    print(r.text)
-    exit(1)
-
-upload_url = r.json()["upload_url"].split("{")[0]
-print(f"Upload URL: {upload_url}")
-
-# 3. Upload files with requests (handles large files + SSL properly)
-files_to_upload = [
-    ("release/Chess_of_Evil.exe",   "Chess_of_Evil.exe",   "application/octet-stream"),
-    ("release/Chess_of_Evil_Linux", "Chess_of_Evil_Linux",  "application/octet-stream"),
-    ("main.py",                     "main.py",              "text/x-python"),
-]
-
-for path, name, mime in files_to_upload:
-    if not os.path.exists(path):
-        print(f"SKIP {name} (not found)")
-        continue
-    size = os.path.getsize(path)
-    print(f"Uploading {name} ({size//1024}KB)...")
-    with open(path, "rb") as f:
-        up = requests.post(
-            f"{upload_url}?name={name}",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": mime,
-                "Accept": "application/vnd.github+json",
-            },
-            data=f,
-            timeout=300,
-        )
-    if up.status_code in (200, 201):
-        print(f"  OK {name}")
-    else:
-        print(f"  WARN {name}: {up.status_code} {up.text[:200]}")
-
-print("Done!")
-PYEOF
+        run: python3 release_helper.py
