@@ -2397,31 +2397,39 @@ class UpdateChecker:
     def _check(self):
         try:
             import ssl as _ssl
-            # Use certifi bundle if available (bundled in .exe via --collect-all certifi)
-            try:
-                import certifi as _certifi
-                ctx = _ssl.create_default_context(cafile=_certifi.where())
-            except ImportError:
-                try:
-                    ctx = _ssl.create_default_context()
-                except Exception:
-                    ctx = _ssl._create_unverified_context()
-
             api = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
             req = _urllib_req.Request(api, headers={
                 "User-Agent": f"ChessOfEvil/{CURRENT_VERSION}",
                 "Accept": "application/vnd.github+json",
             })
-            with _urllib_req.urlopen(req, timeout=10, context=ctx) as resp:
-                data = _json.loads(resp.read().decode("utf-8"))
+
+            # Try SSL contexts in order: certifi → default → unverified
+            data = None
+            last_err = ""
+            for ctx_fn in [
+                lambda: __import__("certifi") and _ssl.create_default_context(
+                    cafile=__import__("certifi").where()),
+                lambda: _ssl.create_default_context(),
+                lambda: _ssl._create_unverified_context(),
+            ]:
+                try:
+                    ctx = ctx_fn()
+                    with _urllib_req.urlopen(req, timeout=12, context=ctx) as resp:
+                        data = _json.loads(resp.read().decode("utf-8"))
+                    break
+                except Exception as e:
+                    last_err = str(e)
+                    continue
+
+            if data is None:
+                raise Exception(last_err)
 
             tag = data.get("tag_name", "")
             self.latest_version = tag.lstrip("v").strip()
             self.release_url = data.get("html_url", "")
             self.check_error = ""
             for asset in data.get("assets", []):
-                name = asset.get("name", "")
-                if name == "main.py":
+                if asset.get("name", "") == "main.py":
                     self.asset_url = asset.get("browser_download_url", "")
                     break
             if not self.asset_url:
@@ -2727,7 +2735,10 @@ class ModeScreen:
                       FONTS["xs"], C["text3"], cx, ver_y + 8, "midtop")
         elif _updater.checked:
             if _updater.check_error:
-                draw_text(surf, f"⚠ Нет связи" if LANG=="ru" else "⚠ No connection",
+                # Show short actual error for debugging
+                err = _updater.check_error
+                short = err[:55] if len(err) > 55 else err
+                draw_text(surf, f"⚠ {short}",
                           FONTS["xs"], C["text3"], cx, ver_y + 8, "midtop")
             else:
                 draw_text(surf, f"✓ Актуальная версия (v{CURRENT_VERSION})" if LANG=="ru" else f"✓ Up to date (v{CURRENT_VERSION})",
