@@ -22,7 +22,7 @@ jobs:
           pip install pygame pyinstaller pillow certifi
       - name: Build .exe
         run: |
-          pyinstaller --onefile --windowed --name "Chess_of_Evil" --add-data "assets;assets" --icon "assets/icon.ico" --collect-all certifi --runtime-tmpdir "." main.py
+          pyinstaller --onefile --windowed --name "Chess_of_Evil" --add-data "assets;assets" --icon "assets/icon.ico" --collect-all certifi main.py
       - uses: actions/upload-artifact@v4
         with:
           name: Chess_of_Evil_Windows
