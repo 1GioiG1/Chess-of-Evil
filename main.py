@@ -2795,17 +2795,16 @@ class App:
         self.MIN_W, self.MIN_H = 900, 600
 
         # Icon MUST be set before display.set_mode on Windows
-        icon_path = resource_path("assets/icon_256.png")
-        if not os.path.exists(icon_path):
-            icon_path = resource_path("assets/icon_32.png")
-        if os.path.exists(icon_path):
-            try:
-                icon_surf = pygame.image.load(icon_path).convert_alpha()
-                # Windows taskbar works best with 32x32
-                icon32 = pygame.transform.smoothscale(icon_surf, (32, 32))
-                pygame.display.set_icon(icon32)
-            except Exception:
-                pass
+        for _iname in ["icon_32.png", "icon_48.png", "icon_256.png"]:
+            _ipath = resource_path(f"assets/{_iname}")
+            if os.path.exists(_ipath):
+                try:
+                    _isurf = pygame.image.load(_ipath).convert_alpha()
+                    _i32 = pygame.transform.smoothscale(_isurf, (32, 32))
+                    pygame.display.set_icon(_i32)
+                    break
+                except Exception:
+                    continue
 
         self.screen = pygame.display.set_mode((self.W, self.H), pygame.RESIZABLE)
         pygame.display.set_caption("Chess of Evil")
@@ -3025,15 +3024,18 @@ class App:
                     self.mode_screen.result = None
 
             self.screen.fill(C["bg"])
-            self.draw_tabs()
             sub_w = self.W
             sub_h = self.H - self.TAB_H
             sub_surf = pygame.Surface((sub_w, sub_h))
             gs = self.game_screen.gs
-            self.settings_screen.locked = gs.game_started and not gs.over
-            # Force to game tab if game active and somehow on another tab
-            if gs.game_started and not gs.over and self.tab != "game":
+            # Lock settings as soon as dice are rolled (not just after first move)
+            in_active_game = gs.rolled or gs.game_started and not gs.over
+            self.settings_screen.locked = in_active_game
+            # Force game tab during active game
+            if in_active_game and self.tab != "game":
                 self.tab = "game"
+            # Draw tabs AFTER forcing tab
+            self.draw_tabs()
             if self.tab == "game":
                 self.game_screen.draw(sub_surf)
             elif self.tab == "settings":

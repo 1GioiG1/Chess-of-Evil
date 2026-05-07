@@ -62,36 +62,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download Windows artifact
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          name: Chess_of_Evil_Windows
           path: release/
+          merge-multiple: true
 
-      - name: Download Linux artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: Chess_of_Evil_Linux
-          path: release/
-
-      - name: Delete existing release if present
+      - name: Delete old release and tag if exists
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete ${{ github.ref_name }} --yes --cleanup-tag 2>/dev/null || true
+          TAG="${{ github.ref_name }}"
+          # Try to delete release (ignore error if not exists)
+          gh release delete "$TAG" --cleanup-tag --yes 2>/dev/null || true
+          # Small wait to let GitHub process deletion
+          sleep 3
 
-      - name: Create Release
+      - name: Create new release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create ${{ github.ref_name }} \
-            --title "Chess of Evil ${{ github.ref_name }}" \
-            --notes "## Шахматы Зла / Chess of Evil ${{ github.ref_name }}
+          TAG="${{ github.ref_name }}"
+          TITLE="Chess of Evil $TAG"
+          NOTES="## Шахматы Зла / Chess of Evil $TAG
 
           ### Скачать / Download
           - **Windows**: \`Chess_of_Evil.exe\`
           - **Linux**: \`Chess_of_Evil_Linux\`
-          - **Исходный код / Source**: \`main.py\`" \
+          - **Source**: \`main.py\`"
+
+          gh release create "$TAG" \
+            --title "$TITLE" \
+            --notes "$NOTES" \
+            --latest \
             release/Chess_of_Evil.exe \
             release/Chess_of_Evil_Linux \
             main.py
