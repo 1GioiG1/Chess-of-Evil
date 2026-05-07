@@ -2510,33 +2510,57 @@ class UpdateChecker:
         if not self.ready_to_restart or not self._downloaded_path:
             return
         try:
-            # Get path of the currently running script / exe
             if getattr(sys, "frozen", False):
-                # PyInstaller bundle — replace the exe
+                # PyInstaller .exe — можно заменить только после закрытия
                 current_exe = sys.executable
-                backup = current_exe + ".bak"
-                _shutil.copy2(current_exe, backup)
-                _shutil.copy2(self._downloaded_path, current_exe)
-                os.remove(self._downloaded_path)
-                # Re-launch
-                _subprocess.Popen([current_exe] + sys.argv[1:])
+                new_exe = self._downloaded_path
+
+                # Создаём .bat файл который:
+                # 1. Ждёт пока текущий процесс закроется
+                # 2. Копирует новый .exe поверх старого
+                # 3. Запускает новый .exe
+                # 4. Удаляет себя
+                bat_path = current_exe + "_update.bat"
+                pid = os.getpid()
+                bat_content = f"""@echo off
+echo Ожидание завершения игры...
+:wait
+tasklist /FI "PID eq {pid}" 2>NUL | find /I "{pid}" >NUL
+if not errorlevel 1 (
+    timeout /t 1 /nobreak >NUL
+    goto wait
+)
+echo Применение обновления...
+timeout /t 1 /nobreak >NUL
+copy /Y "{new_exe}" "{current_exe}"
+del "{new_exe}"
+start "" "{current_exe}"
+del "%~f0"
+"""
+                with open(bat_path, "w", encoding="cp866") as f:
+                    f.write(bat_content)
+
+                # Запускаем батник скрыто и выходим
+                _subprocess.Popen(
+                    ["cmd.exe", "/C", bat_path],
+                    creationflags=_subprocess.CREATE_NO_WINDOW
+                    if hasattr(_subprocess, "CREATE_NO_WINDOW") else 0
+                )
                 pygame.quit()
                 sys.exit(0)
             else:
-                # Running as .py — replace main.py
+                # Running as .py — можно заменить напрямую
                 current_py = os.path.abspath(__file__)
                 backup = current_py + ".bak"
                 _shutil.copy2(current_py, backup)
                 _shutil.copy2(self._downloaded_path, current_py)
                 os.remove(self._downloaded_path)
-                # Re-launch with same Python
                 _subprocess.Popen([sys.executable, current_py] + sys.argv[1:])
                 pygame.quit()
                 sys.exit(0)
         except Exception as e:
             self.download_error = f"Ошибка применения обновления: {e}"
             self.ready_to_restart = False
-
 
 _updater = UpdateChecker()
 
@@ -2845,59 +2869,40 @@ class App:
         _updater.start_check()  # async update check
 
     def _set_win32_icon(self):
-        """Set high-quality window icon via Win32 API (Windows only)."""
+        """Set high-quality 256px window icon via Win32 API (Windows only)."""
         try:
             import ctypes
-            import ctypes.wintypes as wt
+            WM_SETICON  = 0x0080
+            ICON_SMALL  = 0
+            ICON_BIG    = 1
+            IMAGE_ICON  = 1
+            LR_LOADFROMFILE = 0x10
 
-            # Load icon file
             ico_path = resource_path("assets/icon.ico")
             if not os.path.exists(ico_path):
                 return
 
-            # Constants
-            WM_SETICON   = 0x0080
-            ICON_SMALL   = 0
-            ICON_BIG     = 1
-            IMAGE_ICON   = 1
-            LR_LOADFROMFILE = 0x00000010
-            LR_DEFAULTSIZE  = 0x00000040
-
             user32 = ctypes.windll.user32
 
-            # Load big icon (256px or best available)
-            hicon_big = user32.LoadImageW(
-                None, ico_path, IMAGE_ICON,
-                256, 256,
-                LR_LOADFROMFILE
-            )
-            # Load small icon (16px for title bar)
-            hicon_small = user32.LoadImageW(
-                None, ico_path, IMAGE_ICON,
-                16, 16,
-                LR_LOADFROMFILE
-            )
+            # Load icons at specific sizes
+            hbig = user32.LoadImageW(
+                None, ico_path, IMAGE_ICON, 256, 256, LR_LOADFROMFILE)
+            hsmall = user32.LoadImageW(
+                None, ico_path, IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
 
-            # Get pygame window handle
-            import pygame._sdl2 as sdl2  # may not exist in all versions
-            hwnd = None
-            try:
-                from ctypes import c_void_p
-                info = pygame.display.get_wm_info()
-                hwnd = info.get("window")
-            except Exception:
-                pass
-
+            # Get window handle from pygame
+            info = pygame.display.get_wm_info()
+            hwnd = info.get("window")
             if not hwnd:
                 return
 
-            if hicon_big:
-                user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon_big)
-            if hicon_small:
-                user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon_small)
+            if hbig:
+                user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hbig)
+            if hsmall:
+                user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hsmall)
 
         except Exception:
-            pass  # Non-Windows or any error — silently skip
+            pass  # Non-Windows — skip silently
 
     def _active_tabs(self):
         """Return tabs to show based on current state."""
