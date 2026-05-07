@@ -1994,19 +1994,7 @@ class GameScreen:
                 psize = int(sq * 0.74)
                 cx, cy = rect.centerx, rect.centery
 
-                # ── Soft shadow: 3 stacked ellipses, largest→smallest ──
-                # Drawn directly on board before piece
-                sw0 = sq * 60 // 100   # shadow width
-                sh0 = sq * 9  // 100   # shadow height
-                sy0 = rect.bottom - sh0 - 1
-                # outer (lightest)
-                _shad = pygame.Surface((sw0 + 8, sh0 + 6), pygame.SRCALPHA)
-                pygame.draw.ellipse(_shad, (0,0,0,22), (0, 2, sw0+8, sh0+2))
-                pygame.draw.ellipse(_shad, (0,0,0,30), (4, 1, sw0, sh0))
-                pygame.draw.ellipse(_shad, (0,0,0,44), (8, 0, sw0-8, sh0))
-                surf.blit(_shad, (cx - (sw0+8)//2, sy0))
-
-                # ── Piece ─────────────────────────────────────────────
+                # Piece centred on square (no shadow - kept breaking)
                 surf_p = piece_surface(p, psize)
                 surf.blit(surf_p, surf_p.get_rect(center=(cx, cy)))
 
@@ -2014,13 +2002,6 @@ class GameScreen:
         if self.anim and not self.anim.is_done():
             ax, ay = self.anim.pos()
             psize = int(sq * 0.74)
-            # Shadow below animated (floating) piece
-            sw0 = sq * 52 // 100; sh0 = sq * 7 // 100
-            sy0 = int(ay) + psize // 2 - sh0
-            _shad = pygame.Surface((sw0 + 6, sh0 + 4), pygame.SRCALPHA)
-            pygame.draw.ellipse(_shad, (0,0,0,18), (0, 1, sw0+6, sh0+2))
-            pygame.draw.ellipse(_shad, (0,0,0,28), (3, 0, sw0, sh0))
-            surf.blit(_shad, (int(ax) - (sw0+6)//2, sy0))
             surf_p = piece_surface(self.anim.piece, psize)
             surf.blit(surf_p, surf_p.get_rect(center=(int(ax), int(ay) - 3)))
     def _draw_sidebar(self, surf):
@@ -3036,8 +3017,11 @@ class App:
             sub_w = self.W
             sub_h = self.H - self.TAB_H
             sub_surf = pygame.Surface((sub_w, sub_h))
-            self.settings_screen.locked = (self.game_screen.gs.game_started
-                                           and not self.game_screen.gs.over)
+            gs = self.game_screen.gs
+            self.settings_screen.locked = gs.game_started and not gs.over
+            # Force to game tab if game active and somehow on another tab
+            if gs.game_started and not gs.over and self.tab != "game":
+                self.tab = "game"
             if self.tab == "game":
                 self.game_screen.draw(sub_surf)
             elif self.tab == "settings":

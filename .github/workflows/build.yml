@@ -96,12 +96,15 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.ref_name }}
+          fail_on_unmatched_files: false
+          make_latest: true
           files: |
             release/Chess_of_Evil.exe
             release/Chess_of_Evil_Linux
             main.py
           body: |
-            ## Шахматы Зла / Chess of Evil
+            ## Шахматы Зла / Chess of Evil ${{ github.ref_name }}
 
             ### Скачать / Download
             - **Windows**: `Chess_of_Evil.exe`
