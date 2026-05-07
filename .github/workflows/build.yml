@@ -20,6 +20,16 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pygame pyinstaller pillow certifi
+      - name: Inject version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: python
+        run: |
+          import re
+          tag = "${{ github.ref_name }}".lstrip("v")
+          content = open("main.py", encoding="utf-8").read()
+          content = re.sub(r'CURRENT_VERSION = "[^"]+"', f'CURRENT_VERSION = "{tag}"', content)
+          open("main.py", "w", encoding="utf-8").write(content)
+          print(f"Version set to: {tag}")
       - name: Build .exe
         run: |
           pyinstaller --onefile --windowed --name "Chess_of_Evil" --add-data "assets;assets" --icon "assets/icon.ico" --collect-all certifi main.py
@@ -44,6 +54,17 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pygame pyinstaller certifi
+      - name: Inject version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          python3 -c "
+          import re
+          tag = '${{ github.ref_name }}'.lstrip('v')
+          content = open('main.py', encoding='utf-8').read()
+          content = re.sub(r'CURRENT_VERSION = \"[^\"]+\"', f'CURRENT_VERSION = \"{tag}\"', content)
+          open('main.py', 'w', encoding='utf-8').write(content)
+          print(f'Version set to: {tag}')
+          "
       - name: Build Linux binary
         run: |
           pyinstaller --onefile --windowed --name "Chess_of_Evil_Linux" --add-data "assets:assets" --collect-all certifi main.py
