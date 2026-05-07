@@ -18,16 +18,79 @@ s.headers.update({
     "X-GitHub-Api-Version": "2022-11-28",
 })
 
-# Delete existing release if present
+# ── Push .exe to 'releases' branch ──────────────────────────────
+print("Pushing exe to releases branch...")
+
+exe_path = "release/Chess_of_Evil.exe"
+if os.path.exists(exe_path):
+    # Get or create releases branch
+    r = s.get(f"{api}/git/ref/heads/releases")
+    if r.status_code == 404:
+        # Create branch from main
+        main = s.get(f"{api}/git/ref/heads/main")
+        if main.status_code != 200:
+            main = s.get(f"{api}/git/ref/heads/master")
+        sha = main.json()["object"]["sha"]
+        s.post(f"{api}/git/refs", json={
+            "ref": "refs/heads/releases",
+            "sha": sha
+        })
+        print("Created releases branch")
+
+    # Get current file SHA if exists (needed for update)
+    r = s.get(f"{api}/contents/Chess_of_Evil.exe",
+              params={"ref": "releases"})
+    file_sha = r.json().get("sha") if r.status_code == 200 else None
+
+    # Read and encode file
+    import base64
+    with open(exe_path, "rb") as f:
+        content = base64.b64encode(f.read()).decode()
+
+    payload = {
+        "message": f"Update exe for {tag}",
+        "content": content,
+        "branch": "releases",
+    }
+    if file_sha:
+        payload["sha"] = file_sha
+
+    r = s.put(f"{api}/contents/Chess_of_Evil.exe", json=payload)
+    if r.status_code in (200, 201):
+        print(f"OK Chess_of_Evil.exe pushed to releases branch")
+    else:
+        print(f"WARN: {r.status_code} {r.text[:300]}")
+else:
+    print(f"SKIP: {exe_path} not found")
+
+# Also push main.py
+for path, name in [("main.py", "main.py")]:
+    if not os.path.exists(path):
+        continue
+    r = s.get(f"{api}/contents/{name}", params={"ref": "releases"})
+    file_sha = r.json().get("sha") if r.status_code == 200 else None
+    with open(path, "rb") as f:
+        content = base64.b64encode(f.read()).decode()
+    payload = {"message": f"Update {name} for {tag}", "content": content, "branch": "releases"}
+    if file_sha:
+        payload["sha"] = file_sha
+    r = s.put(f"{api}/contents/{name}", json=payload)
+    print(f"{'OK' if r.status_code in (200,201) else 'WARN'} {name}")
+
+# ── Also create/update Release with source code info ────────────
 r = s.get(f"{api}/releases/tags/{tag}")
 if r.status_code == 200:
     rid = r.json()["id"]
-    print(f"Deleting release {rid}...")
     s.delete(f"{api}/releases/{rid}")
     time.sleep(2)
 
-# Create release
-body = f"## Chess of Evil {tag}\n\n- **Windows**: Chess_of_Evil.exe\n- **Linux**: Chess_of_Evil_Linux\n- **Source**: main.py"
+raw_base = f"https://raw.githubusercontent.com/{repo}/releases"
+body = (f"## Chess of Evil {tag}\n\n"
+        f"### Скачать / Download\n"
+        f"- **Windows**: [{raw_base}/Chess_of_Evil.exe]({raw_base}/Chess_of_Evil.exe)\n"
+        f"- **Source**: [{raw_base}/main.py]({raw_base}/main.py)\n\n"
+        f"Или скачай [Chess_of_Evil.exe]({raw_base}/Chess_of_Evil.exe) напрямую.")
+
 r = s.post(f"{api}/releases", json={
     "tag_name": tag,
     "name": f"Chess of Evil {tag}",
@@ -36,52 +99,5 @@ r = s.post(f"{api}/releases", json={
     "prerelease": False,
     "make_latest": "true",
 })
-print(f"Create release: {r.status_code}")
-if r.status_code != 201:
-    print(r.text)
-    sys.exit(1)
-
-upload_url = r.json()["upload_url"].split("{")[0]
-release_id = r.json()["id"]
-print(f"Release ID: {release_id}")
-
-# Upload files via curl (much more reliable for large files)
-files_to_upload = [
-    ("release/Chess_of_Evil.exe",   "Chess_of_Evil.exe",   "application/octet-stream"),
-    ("release/Chess_of_Evil_Linux", "Chess_of_Evil_Linux",  "application/octet-stream"),
-    ("main.py",                     "main.py",              "text/x-python"),
-]
-
-for path, name, mime in files_to_upload:
-    if not os.path.exists(path):
-        print(f"SKIP {name}")
-        continue
-    size = os.path.getsize(path)
-    print(f"Uploading {name} ({size//1024}KB) via curl...")
-    
-    result = subprocess.run([
-        "curl", "-sS",
-        "--max-time", "600",
-        "--retry", "3",
-        "--retry-delay", "5",
-        "-X", "POST",
-        "-H", f"Authorization: Bearer {token}",
-        "-H", f"Content-Type: {mime}",
-        "-H", "Accept: application/vnd.github+json",
-        "--data-binary", f"@{path}",
-        f"{upload_url}?name={name}"
-    ], capture_output=True, text=True)
-    
-    if result.returncode == 0:
-        try:
-            resp_json = json.loads(result.stdout)
-            if "id" in resp_json:
-                print(f"  OK {name} (asset id: {resp_json['id']})")
-            else:
-                print(f"  WARN {name}: {result.stdout[:200]}")
-        except Exception:
-            print(f"  OK {name}")
-    else:
-        print(f"  ERROR {name}: {result.stderr[:200]}")
-
+print(f"Release: {r.status_code}")
 print("Done!")

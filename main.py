@@ -2429,26 +2429,25 @@ class UpdateChecker:
             self.release_url = data.get("html_url", "")
             self.check_error = ""
             assets = data.get("assets", [])
-
             is_frozen = getattr(sys, "frozen", False)
 
+            # Primary: raw URL from releases branch (most reliable)
+            raw_base = f"https://raw.githubusercontent.com/{GITHUB_REPO}/releases"
             if is_frozen:
-                # Running as .exe — download .exe update only
-                for asset in assets:
-                    name = asset.get("name", "")
-                    if name.endswith(".exe"):
-                        self.asset_url = asset.get("browser_download_url", "")
-                        break
+                self.asset_url = f"{raw_base}/Chess_of_Evil.exe"
             else:
-                # Running as .py — download main.py
-                for asset in assets:
-                    if asset.get("name", "") == "main.py":
-                        self.asset_url = asset.get("browser_download_url", "")
-                        break
-                # Fallback to exe if no main.py
-                if not self.asset_url:
+                self.asset_url = f"{raw_base}/main.py"
+
+            # Fallback: assets attached to release
+            if not self.asset_url:
+                if is_frozen:
                     for asset in assets:
                         if asset.get("name", "").endswith(".exe"):
+                            self.asset_url = asset.get("browser_download_url", "")
+                            break
+                else:
+                    for asset in assets:
+                        if asset.get("name", "") == "main.py":
                             self.asset_url = asset.get("browser_download_url", "")
                             break
         except Exception as e:
@@ -2486,15 +2485,23 @@ class UpdateChecker:
 
     def _download(self):
         try:
+            import ssl as _ssl
+            # Try with SSL context
+            try:
+                import certifi as _certifi
+                ctx = _ssl.create_default_context(cafile=_certifi.where())
+            except Exception:
+                ctx = _ssl._create_unverified_context()
+
             req = _urllib_req.Request(
                 self.asset_url,
-                headers={"User-Agent": "ChessOfEvil"}
+                headers={"User-Agent": f"ChessOfEvil/{CURRENT_VERSION}"}
             )
-            with _urllib_req.urlopen(req, timeout=30) as resp:
+            with _urllib_req.urlopen(req, timeout=60, context=ctx) as resp:
+                # Check it's actually a binary/py file not a 404 page
+                content_type = resp.headers.get("Content-Type", "")
                 total = int(resp.headers.get("Content-Length", 0))
-                # Write to temp file
-                suffix = ".py" if self.asset_url.endswith(".py") else \
-                         ".exe" if self.asset_url.endswith(".exe") else ""
+                suffix = ".py" if self.asset_url.endswith(".py") else ".exe"
                 fd, tmp_path = _tempfile.mkstemp(suffix=suffix)
                 received = 0
                 with os.fdopen(fd, "wb") as f:
@@ -2506,11 +2513,22 @@ class UpdateChecker:
                         received += len(chunk)
                         if total > 0:
                             self.download_progress = received / total
+                # Sanity check: exe should be > 1MB
+                if suffix == ".exe" and received < 1_000_000:
+                    os.remove(tmp_path)
+                    raise Exception(f"Downloaded file too small ({received} bytes) - probably 404")
                 self._downloaded_path = tmp_path
                 self.download_progress = 1.0
                 self.ready_to_restart = True
         except Exception as e:
             self.download_error = str(e)
+            # Fallback: open browser
+            if self.release_url:
+                try:
+                    import webbrowser
+                    webbrowser.open(self.release_url)
+                except Exception:
+                    pass
         finally:
             self.downloading = False
 
