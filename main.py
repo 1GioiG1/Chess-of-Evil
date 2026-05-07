@@ -2364,27 +2364,19 @@ class GameScreen:
 # ─────────────────────────────────────────
 #  AUTO-UPDATER
 # ─────────────────────────────────────────
-CURRENT_VERSION = "1.9.9"   # обновляй при каждом релизе / update on each release
-GITHUB_REPO = "1GioiG1/Chess-of-Evil"   # ваш репозиторий
+CURRENT_VERSION = "2.0.4"   # auto-updated by build.yml — do not edit manually
+GITHUB_REPO = "1GioiG1/Chess-of-Evil"
 
 import urllib.request as _urllib_req
-import subprocess as _subprocess
-import tempfile as _tempfile
-import shutil as _shutil
 
 class UpdateChecker:
+    """Simple update checker — only checks version, opens browser to download."""
     def __init__(self):
         self.latest_version: str | None = None
         self.release_url: str = ""
-        self.asset_url: str = ""
         self.checked = False
         self.checking = False
         self.check_error: str = ""
-        self.downloading = False
-        self.download_progress = 0.0     # 0.0 → 1.0
-        self.download_error: str = ""
-        self.ready_to_restart = False
-        self._downloaded_path: str = ""
         self._thread: threading.Thread | None = None
 
     def start_check(self):
@@ -2402,54 +2394,16 @@ class UpdateChecker:
                 "User-Agent": f"ChessOfEvil/{CURRENT_VERSION}",
                 "Accept": "application/vnd.github+json",
             })
-
-            # Try SSL contexts in order: certifi → default → unverified
-            data = None
-            last_err = ""
-            for ctx_fn in [
-                lambda: __import__("certifi") and _ssl.create_default_context(
-                    cafile=__import__("certifi").where()),
-                lambda: _ssl.create_default_context(),
-                lambda: _ssl._create_unverified_context(),
-            ]:
-                try:
-                    ctx = ctx_fn()
-                    with _urllib_req.urlopen(req, timeout=12, context=ctx) as resp:
-                        data = _json.loads(resp.read().decode("utf-8"))
-                    break
-                except Exception as e:
-                    last_err = str(e)
-                    continue
-
-            if data is None:
-                raise Exception(last_err)
-
-            tag = data.get("tag_name", "")
-            self.latest_version = tag.lstrip("v").strip()
+            try:
+                import certifi as _certifi
+                ctx = _ssl.create_default_context(cafile=_certifi.where())
+            except Exception:
+                ctx = _ssl._create_unverified_context()
+            with _urllib_req.urlopen(req, timeout=10, context=ctx) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
+            self.latest_version = data.get("tag_name", "").lstrip("v").strip()
             self.release_url = data.get("html_url", "")
             self.check_error = ""
-            assets = data.get("assets", [])
-            is_frozen = getattr(sys, "frozen", False)
-
-            # Primary: raw URL from releases branch (most reliable)
-            raw_base = f"https://raw.githubusercontent.com/{GITHUB_REPO}/releases"
-            if is_frozen:
-                self.asset_url = f"{raw_base}/Chess_of_Evil.exe"
-            else:
-                self.asset_url = f"{raw_base}/main.py"
-
-            # Fallback: assets attached to release
-            if not self.asset_url:
-                if is_frozen:
-                    for asset in assets:
-                        if asset.get("name", "").endswith(".exe"):
-                            self.asset_url = asset.get("browser_download_url", "")
-                            break
-                else:
-                    for asset in assets:
-                        if asset.get("name", "") == "main.py":
-                            self.asset_url = asset.get("browser_download_url", "")
-                            break
         except Exception as e:
             self.latest_version = None
             self.check_error = str(e)
@@ -2461,133 +2415,17 @@ class UpdateChecker:
         if not self.latest_version:
             return False
         try:
-            # Strip any leading 'v', take only digits and dots
             import re as _re
-            def parse_ver(s):
-                s = s.strip().lstrip("v")
-                parts = _re.findall(r'\d+', s)
-                return tuple(int(x) for x in parts[:3]) if parts else (0,)
-            cur = parse_ver(CURRENT_VERSION)
-            lat = parse_ver(self.latest_version)
-            return lat > cur
+            def pv(s):
+                return tuple(int(x) for x in _re.findall(r"\d+", s.lstrip("v"))[:3]) or (0,)
+            return pv(self.latest_version) > pv(CURRENT_VERSION)
         except Exception:
             return False
 
-    def start_download(self):
-        """Start downloading the update in background thread."""
-        if self.downloading or not self.asset_url:
-            return
-        self.downloading = True
-        self.download_progress = 0.0
-        self.download_error = ""
-        t = threading.Thread(target=self._download, daemon=True)
-        t.start()
-
-    def _download(self):
-        try:
-            import ssl as _ssl
-            # Try with SSL context
-            try:
-                import certifi as _certifi
-                ctx = _ssl.create_default_context(cafile=_certifi.where())
-            except Exception:
-                ctx = _ssl._create_unverified_context()
-
-            req = _urllib_req.Request(
-                self.asset_url,
-                headers={"User-Agent": f"ChessOfEvil/{CURRENT_VERSION}"}
-            )
-            with _urllib_req.urlopen(req, timeout=60, context=ctx) as resp:
-                # Check it's actually a binary/py file not a 404 page
-                content_type = resp.headers.get("Content-Type", "")
-                total = int(resp.headers.get("Content-Length", 0))
-                suffix = ".py" if self.asset_url.endswith(".py") else ".exe"
-                fd, tmp_path = _tempfile.mkstemp(suffix=suffix)
-                received = 0
-                with os.fdopen(fd, "wb") as f:
-                    while True:
-                        chunk = resp.read(65536)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        received += len(chunk)
-                        if total > 0:
-                            self.download_progress = received / total
-                # Sanity check: exe should be > 1MB
-                if suffix == ".exe" and received < 1_000_000:
-                    os.remove(tmp_path)
-                    raise Exception(f"Downloaded file too small ({received} bytes) - probably 404")
-                self._downloaded_path = tmp_path
-                self.download_progress = 1.0
-                self.ready_to_restart = True
-        except Exception as e:
-            self.download_error = str(e)
-            # Fallback: open browser
-            if self.release_url:
-                try:
-                    import webbrowser
-                    webbrowser.open(self.release_url)
-                except Exception:
-                    pass
-        finally:
-            self.downloading = False
-
-    def apply_and_restart(self):
-        """Replace current file and restart the process."""
-        if not self.ready_to_restart or not self._downloaded_path:
-            return
-        try:
-            if getattr(sys, "frozen", False):
-                # PyInstaller .exe — можно заменить только после закрытия
-                current_exe = sys.executable
-                new_exe = self._downloaded_path
-
-                # Создаём .bat файл который:
-                # 1. Ждёт пока текущий процесс закроется
-                # 2. Копирует новый .exe поверх старого
-                # 3. Запускает новый .exe
-                # 4. Удаляет себя
-                bat_path = current_exe + "_update.bat"
-                pid = os.getpid()
-                bat_content = f"""@echo off
-echo Ожидание завершения игры...
-:wait
-tasklist /FI "PID eq {pid}" 2>NUL | find /I "{pid}" >NUL
-if not errorlevel 1 (
-    timeout /t 1 /nobreak >NUL
-    goto wait
-)
-echo Применение обновления...
-timeout /t 1 /nobreak >NUL
-copy /Y "{new_exe}" "{current_exe}"
-del "{new_exe}"
-start "" "{current_exe}"
-del "%~f0"
-"""
-                with open(bat_path, "w", encoding="cp866") as f:
-                    f.write(bat_content)
-
-                # Запускаем батник скрыто и выходим
-                _subprocess.Popen(
-                    ["cmd.exe", "/C", bat_path],
-                    creationflags=_subprocess.CREATE_NO_WINDOW
-                    if hasattr(_subprocess, "CREATE_NO_WINDOW") else 0
-                )
-                pygame.quit()
-                sys.exit(0)
-            else:
-                # Running as .py — можно заменить напрямую
-                current_py = os.path.abspath(__file__)
-                backup = current_py + ".bak"
-                _shutil.copy2(current_py, backup)
-                _shutil.copy2(self._downloaded_path, current_py)
-                os.remove(self._downloaded_path)
-                _subprocess.Popen([sys.executable, current_py] + sys.argv[1:])
-                pygame.quit()
-                sys.exit(0)
-        except Exception as e:
-            self.download_error = f"Ошибка применения обновления: {e}"
-            self.ready_to_restart = False
+    def open_release_page(self):
+        if self.release_url:
+            import webbrowser
+            webbrowser.open(self.release_url)
 
 _updater = UpdateChecker()
 
@@ -2745,51 +2583,22 @@ class ModeScreen:
         # ── Version / Update bar at bottom ─────────────
         ver_y = sh - 36
         draw_text(surf, f"v{CURRENT_VERSION}", FONTS["xs"], C["text3"], 14, ver_y + 8, "topleft")
-        self._btn_update = None  # reset each frame
+        self._btn_update = None
 
-        if _updater.download_error:
-            err_short = _updater.download_error[:70]
-            draw_text(surf, f"✗ {err_short}", FONTS["xs"], C["red2"], cx, ver_y + 8, "midtop")
-
-        elif _updater.ready_to_restart:
-            lbl = "✓  Готово — нажмите для перезапуска" if LANG=="ru" else "✓  Done — click to restart"
-            bw2 = FONTS["med"].size(lbl)[0] + 28
-            btn_r = pygame.Rect(cx - bw2 // 2, ver_y - 2, bw2, 32)
-            draw_rect(surf, (30, 100, 50), btn_r, 6, 2, (60, 200, 100))
-            draw_text(surf, lbl, FONTS["med"], (120, 255, 150), btn_r.centerx, btn_r.centery, "center")
-            self._btn_update = btn_r
-
-        elif _updater.downloading:
-            prog = _updater.download_progress
-            pct = int(prog * 100)
-            lbl = f"⬇  {'Скачивание' if LANG=='ru' else 'Downloading'} {pct}%..."
-            draw_text(surf, lbl, FONTS["sm"], C["text2"], cx, ver_y + 2, "midtop")
-            bar_w2 = 260
-            bx2 = cx - bar_w2 // 2
-            pygame.draw.rect(surf, C["bg3"], (bx2, ver_y + 22, bar_w2, 6), border_radius=3)
-            pygame.draw.rect(surf, C["accent"], (bx2, ver_y + 22, int(bar_w2 * prog), 6), border_radius=3)
-
-        elif _updater.update_available():
-            has_direct = bool(_updater.asset_url)
-            if has_direct:
-                lbl = f"⬆  {'Доступна' if LANG=='ru' else 'Update'} v{_updater.latest_version} — {'скачать и обновить' if LANG=='ru' else 'download & update'}"
-            else:
-                lbl = f"⬆  {'Доступна' if LANG=='ru' else 'Update'} v{_updater.latest_version} — {'открыть страницу' if LANG=='ru' else 'open page'}"
+        if _updater.update_available():
+            lbl = f"⬆  Доступна v{_updater.latest_version} — скачать" if LANG=="ru" else \
+                  f"⬆  Update v{_updater.latest_version} available — download"
             bw2 = FONTS["sm"].size(lbl)[0] + 28
             btn_u = pygame.Rect(cx - bw2 // 2, ver_y, bw2, 30)
             draw_rect(surf, (35, 70, 35), btn_u, 6, 1, (70, 150, 70))
             draw_text(surf, lbl, FONTS["sm"], (130, 220, 130), btn_u.centerx, btn_u.centery, "center")
             self._btn_update = btn_u
-
         elif _updater.checking:
             draw_text(surf, "Проверка обновлений..." if LANG=="ru" else "Checking for updates...",
                       FONTS["xs"], C["text3"], cx, ver_y + 8, "midtop")
         elif _updater.checked:
             if _updater.check_error:
-                # Show short actual error for debugging
-                err = _updater.check_error
-                short = err[:55] if len(err) > 55 else err
-                draw_text(surf, f"⚠ {short}",
+                draw_text(surf, "⚠ Нет связи" if LANG=="ru" else "⚠ No connection",
                           FONTS["xs"], C["text3"], cx, ver_y + 8, "midtop")
             else:
                 draw_text(surf, f"✓ Актуальная версия (v{CURRENT_VERSION})" if LANG=="ru" else f"✓ Up to date (v{CURRENT_VERSION})",
@@ -2798,16 +2607,9 @@ class ModeScreen:
     def handle(self, event):
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             pos = event.pos
-            # Update button — behaviour depends on state
+            # Update button — open release page in browser
             if hasattr(self, "_btn_update") and self._btn_update and self._btn_update.collidepoint(pos):
-                if _updater.ready_to_restart:
-                    _updater.apply_and_restart()
-                elif _updater.update_available():
-                    if _updater.asset_url and not _updater.downloading:
-                        _updater.start_download()
-                    elif _updater.release_url:
-                        import webbrowser
-                        webbrowser.open(_updater.release_url)
+                _updater.open_release_page()
             # Local play
             if hasattr(self, "_btn_local") and self._btn_local.collidepoint(pos):
                 self.result = {"mode": "local"}
