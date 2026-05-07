@@ -2416,14 +2416,17 @@ class UpdateChecker:
     def _check(self):
         try:
             api = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-            req = _urllib_req.Request(api, headers={"User-Agent": "ChessOfEvil/1.0"})
-            with _urllib_req.urlopen(req, timeout=8) as resp:
-                data = _json.loads(resp.read())
+            # GitHub requires a proper User-Agent; generic one works from .exe too
+            req = _urllib_req.Request(api, headers={
+                "User-Agent": f"ChessOfEvil/{CURRENT_VERSION} (pygame app)",
+                "Accept": "application/vnd.github+json",
+            })
+            with _urllib_req.urlopen(req, timeout=10) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
                 tag = data.get("tag_name", "")
                 self.latest_version = tag.lstrip("v").strip()
                 self.release_url = data.get("html_url", "")
                 self.check_error = ""
-                # Look for main.py asset first, then .exe, then _Linux
                 for asset in data.get("assets", []):
                     name = asset.get("name", "")
                     if name == "main.py":
@@ -2915,6 +2918,14 @@ class App:
                         self.game_screen.refresh_labels()
                         self.settings_screen.refresh_labels()
                         self.tutorial_screen.refresh_labels()
+                    # "← Menu" back button (shown over settings/tutorial)
+                    if (event.type == pygame.MOUSEBUTTONDOWN and event.button == 1
+                            and self.tab in ("settings", "learn")
+                            and hasattr(self, "_back_btn_rect")
+                            and self._back_btn_rect
+                            and self._back_btn_rect.collidepoint(event.pos)):
+                        self.tab = "game"
+                        continue
                     # Tab bar
                     if self.handle_tabs(event):
                         continue
@@ -2955,18 +2966,27 @@ class App:
                 self.screen.fill(C["bg"])
                 self.draw_tabs()
                 sub = pygame.Surface((self.W, self.H - self.TAB_H))
-                # In mode screen: tab bar shows settings/learn tabs
-                # If user clicked one of those tabs, show that screen
                 if self.tab == "settings":
                     self.settings_screen.locked = False
                     self.settings_screen.draw(sub)
                 elif self.tab == "learn":
-                    tut_result = None
-                    # Tutorial events already handled via ev_offset above
                     self.tutorial_screen.draw(sub)
                 else:
-                    self.tab = "game"  # reset to game (= mode screen view)
+                    self.tab = "game"
                     self.mode_screen.draw(sub)
+
+                # "← Меню" button drawn over settings/tutorial
+                if self.tab in ("settings", "learn"):
+                    back_lbl = "← Меню" if LANG == "ru" else "← Menu"
+                    back_w = FONTS["med"].size(back_lbl)[0] + 24
+                    back_rect = pygame.Rect(self.W - back_w - 110, 6, back_w, 32)
+                    draw_rect(self.screen, C["bg3"], back_rect, 8, 1, C["border"])
+                    draw_text(self.screen, back_lbl, FONTS["med"], C["text2"],
+                              back_rect.centerx, back_rect.centery, "center")
+                    self._back_btn_rect = back_rect
+                else:
+                    self._back_btn_rect = None
+
                 self.screen.blit(sub, (0, self.TAB_H))
                 pygame.display.flip()
                 continue
