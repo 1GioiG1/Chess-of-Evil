@@ -68,33 +68,34 @@ jobs:
           path: release/
           merge-multiple: true
 
-      - name: Delete old release and tag if exists
+      - name: Delete old release if exists
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.ref_name }}"
-          # Try to delete release (ignore error if not exists)
-          gh release delete "$TAG" --cleanup-tag --yes 2>/dev/null || true
-          # Small wait to let GitHub process deletion
-          sleep 3
+          # Check if release exists, delete only if it does
+          if gh release view "$TAG" &>/dev/null; then
+            echo "Release $TAG exists, deleting..."
+            gh release delete "$TAG" --yes
+            sleep 5
+          else
+            echo "No existing release for $TAG"
+          fi
 
-      - name: Create new release
+      - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.ref_name }}"
-          TITLE="Chess of Evil $TAG"
-          NOTES="## Шахматы Зла / Chess of Evil $TAG
+          gh release create "$TAG" \
+            --title "Chess of Evil $TAG" \
+            --notes "## Шахматы Зла / Chess of Evil $TAG
 
           ### Скачать / Download
           - **Windows**: \`Chess_of_Evil.exe\`
           - **Linux**: \`Chess_of_Evil_Linux\`
-          - **Source**: \`main.py\`"
-
-          gh release create "$TAG" \
-            --title "$TITLE" \
-            --notes "$NOTES" \
+          - **Source**: \`main.py\`" \
             --latest \
-            release/Chess_of_Evil.exe \
-            release/Chess_of_Evil_Linux \
-            main.py
+            "release/Chess_of_Evil.exe" \
+            "release/Chess_of_Evil_Linux" \
+            "main.py"

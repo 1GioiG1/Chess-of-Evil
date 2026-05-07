@@ -2794,7 +2794,8 @@ class App:
         self.W, self.H = 1100, 700
         self.MIN_W, self.MIN_H = 900, 600
 
-        # Icon MUST be set before display.set_mode on Windows
+        # Set pygame icon (32x32) BEFORE display.set_mode — affects taskbar on some OS
+        _icon_set = False
         for _iname in ["icon_32.png", "icon_48.png", "icon_256.png"]:
             _ipath = resource_path(f"assets/{_iname}")
             if os.path.exists(_ipath):
@@ -2802,6 +2803,7 @@ class App:
                     _isurf = pygame.image.load(_ipath).convert_alpha()
                     _i32 = pygame.transform.smoothscale(_isurf, (32, 32))
                     pygame.display.set_icon(_i32)
+                    _icon_set = True
                     break
                 except Exception:
                     continue
@@ -2809,6 +2811,10 @@ class App:
         self.screen = pygame.display.set_mode((self.W, self.H), pygame.RESIZABLE)
         pygame.display.set_caption("Chess of Evil")
         self.clock = pygame.time.Clock()
+
+        # Win32 API: set high-quality icon (256px) in window title bar
+        # This overrides pygame's 32x32 limitation on Windows
+        self._set_win32_icon()
 
         load_fonts()
         clear_piece_cache()
@@ -2826,6 +2832,61 @@ class App:
                                 color=C["bg3"], hover_color=C["btn_hover"])
         self.show_mode_screen = True  # show on first launch
         _updater.start_check()  # async update check
+
+    def _set_win32_icon(self):
+        """Set high-quality window icon via Win32 API (Windows only)."""
+        try:
+            import ctypes
+            import ctypes.wintypes as wt
+
+            # Load icon file
+            ico_path = resource_path("assets/icon.ico")
+            if not os.path.exists(ico_path):
+                return
+
+            # Constants
+            WM_SETICON   = 0x0080
+            ICON_SMALL   = 0
+            ICON_BIG     = 1
+            IMAGE_ICON   = 1
+            LR_LOADFROMFILE = 0x00000010
+            LR_DEFAULTSIZE  = 0x00000040
+
+            user32 = ctypes.windll.user32
+
+            # Load big icon (256px or best available)
+            hicon_big = user32.LoadImageW(
+                None, ico_path, IMAGE_ICON,
+                256, 256,
+                LR_LOADFROMFILE
+            )
+            # Load small icon (16px for title bar)
+            hicon_small = user32.LoadImageW(
+                None, ico_path, IMAGE_ICON,
+                16, 16,
+                LR_LOADFROMFILE
+            )
+
+            # Get pygame window handle
+            import pygame._sdl2 as sdl2  # may not exist in all versions
+            hwnd = None
+            try:
+                from ctypes import c_void_p
+                info = pygame.display.get_wm_info()
+                hwnd = info.get("window")
+            except Exception:
+                pass
+
+            if not hwnd:
+                return
+
+            if hicon_big:
+                user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon_big)
+            if hicon_small:
+                user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon_small)
+
+        except Exception:
+            pass  # Non-Windows or any error — silently skip
 
     def _active_tabs(self):
         """Return tabs to show based on current state."""
