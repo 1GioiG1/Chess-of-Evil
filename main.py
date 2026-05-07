@@ -2396,35 +2396,44 @@ class UpdateChecker:
 
     def _check(self):
         try:
+            import ssl as _ssl
             api = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-            # GitHub requires a proper User-Agent; generic one works from .exe too
             req = _urllib_req.Request(api, headers={
-                "User-Agent": f"ChessOfEvil/{CURRENT_VERSION} (pygame app)",
+                "User-Agent": f"ChessOfEvil/{CURRENT_VERSION}",
                 "Accept": "application/vnd.github+json",
             })
-            with _urllib_req.urlopen(req, timeout=10) as resp:
-                data = _json.loads(resp.read().decode("utf-8"))
-                tag = data.get("tag_name", "")
-                self.latest_version = tag.lstrip("v").strip()
-                self.release_url = data.get("html_url", "")
-                self.check_error = ""
+            # Create unverified SSL context as fallback for PyInstaller bundles
+            ctx = _ssl.create_default_context()
+            try:
+                with _urllib_req.urlopen(req, timeout=10, context=ctx) as resp:
+                    data = _json.loads(resp.read().decode("utf-8"))
+            except Exception:
+                # Fallback: skip SSL verification (safe for reading public API)
+                ctx2 = _ssl._create_unverified_context()
+                with _urllib_req.urlopen(req, timeout=10, context=ctx2) as resp:
+                    data = _json.loads(resp.read().decode("utf-8"))
+
+            tag = data.get("tag_name", "")
+            self.latest_version = tag.lstrip("v").strip()
+            self.release_url = data.get("html_url", "")
+            self.check_error = ""
+            for asset in data.get("assets", []):
+                name = asset.get("name", "")
+                if name == "main.py":
+                    self.asset_url = asset.get("browser_download_url", "")
+                    break
+            if not self.asset_url:
                 for asset in data.get("assets", []):
                     name = asset.get("name", "")
-                    if name == "main.py":
+                    if name.endswith(".exe"):
                         self.asset_url = asset.get("browser_download_url", "")
                         break
-                if not self.asset_url:
-                    for asset in data.get("assets", []):
-                        name = asset.get("name", "")
-                        if name.endswith(".exe"):
-                            self.asset_url = asset.get("browser_download_url", "")
-                            break
-                if not self.asset_url:
-                    for asset in data.get("assets", []):
-                        name = asset.get("name", "")
-                        if "_Linux" in name:
-                            self.asset_url = asset.get("browser_download_url", "")
-                            break
+            if not self.asset_url:
+                for asset in data.get("assets", []):
+                    name = asset.get("name", "")
+                    if "_Linux" in name:
+                        self.asset_url = asset.get("browser_download_url", "")
+                        break
         except Exception as e:
             self.latest_version = None
             self.check_error = str(e)
@@ -2956,11 +2965,13 @@ class App:
                     self.tab = "game"
                     self.mode_screen.draw(sub)
 
-                # "← Меню" button drawn over settings/tutorial
+                # "← Меню" button drawn at top-left of content area (inside sub, not tab bar)
                 if self.tab in ("settings", "learn"):
                     back_lbl = "← Меню" if LANG == "ru" else "← Menu"
-                    back_w = FONTS["med"].size(back_lbl)[0] + 24
-                    back_rect = pygame.Rect(self.W - back_w - 110, 6, back_w, 32)
+                    back_w = FONTS["med"].size(back_lbl)[0] + 20
+                    back_h = 30
+                    # Position: bottom-left corner of screen, above any content
+                    back_rect = pygame.Rect(12, self.H - back_h - 10, back_w, back_h)
                     draw_rect(self.screen, C["bg3"], back_rect, 8, 1, C["border"])
                     draw_text(self.screen, back_lbl, FONTS["med"], C["text2"],
                               back_rect.centerx, back_rect.centery, "center")

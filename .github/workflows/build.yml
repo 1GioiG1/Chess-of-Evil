@@ -3,8 +3,7 @@ name: Build Chess of Evil
 on:
   push:
     branches: [ main, master ]
-    tags:
-      - 'v*'
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
@@ -13,25 +12,18 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pygame pyinstaller pillow
-
-      - name: Build .exe with PyInstaller
+      - name: Build .exe
         run: |
           pyinstaller --onefile --windowed --name "Chess_of_Evil" --add-data "assets;assets" --icon "assets/icon.ico" main.py
-
-      - name: Upload .exe as artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: Chess_of_Evil_Windows
           path: dist/Chess_of_Evil.exe
@@ -40,32 +32,22 @@ jobs:
   build-linux:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev \
-            libfreetype6-dev libportmidi-dev
-
+          sudo apt-get install -y libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev libfreetype6-dev libportmidi-dev
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pygame pyinstaller
-
       - name: Build Linux binary
         run: |
           pyinstaller --onefile --windowed --name "Chess_of_Evil_Linux" --add-data "assets:assets" main.py
-
-      - name: Upload Linux binary
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: Chess_of_Evil_Linux
           path: dist/Chess_of_Evil_Linux
@@ -78,31 +60,23 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Download Windows artifact
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          name: Chess_of_Evil_Windows
           path: release/
+          merge-multiple: true
 
-      - name: Download Linux artifact
-        uses: actions/download-artifact@v4
+      - name: Publish Release
+        uses: ncipollo/release-action@v1
         with:
-          name: Chess_of_Evil_Linux
-          path: release/
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          fail_on_unmatched_files: false
-          make_latest: true
-          files: |
-            release/Chess_of_Evil.exe
-            release/Chess_of_Evil_Linux
-            main.py
+          tag: ${{ github.ref_name }}
+          name: "Chess of Evil ${{ github.ref_name }}"
+          allowUpdates: true
+          removeArtifacts: false
+          replacesArtifacts: true
+          artifacts: "release/Chess_of_Evil.exe,release/Chess_of_Evil_Linux,main.py"
           body: |
             ## Шахматы Зла / Chess of Evil ${{ github.ref_name }}
 
