@@ -2428,20 +2428,29 @@ class UpdateChecker:
             self.latest_version = tag.lstrip("v").strip()
             self.release_url = data.get("html_url", "")
             self.check_error = ""
-            for asset in data.get("assets", []):
-                if asset.get("name", "") == "main.py":
-                    self.asset_url = asset.get("browser_download_url", "")
-                    break
-            if not self.asset_url:
-                for asset in data.get("assets", []):
-                    if asset.get("name", "").endswith(".exe"):
+            assets = data.get("assets", [])
+
+            is_frozen = getattr(sys, "frozen", False)
+
+            if is_frozen:
+                # Running as .exe — download .exe update only
+                for asset in assets:
+                    name = asset.get("name", "")
+                    if name.endswith(".exe"):
                         self.asset_url = asset.get("browser_download_url", "")
                         break
-            if not self.asset_url:
-                for asset in data.get("assets", []):
-                    if "_Linux" in asset.get("name", ""):
+            else:
+                # Running as .py — download main.py
+                for asset in assets:
+                    if asset.get("name", "") == "main.py":
                         self.asset_url = asset.get("browser_download_url", "")
                         break
+                # Fallback to exe if no main.py
+                if not self.asset_url:
+                    for asset in assets:
+                        if asset.get("name", "").endswith(".exe"):
+                            self.asset_url = asset.get("browser_download_url", "")
+                            break
         except Exception as e:
             self.latest_version = None
             self.check_error = str(e)
