@@ -2364,8 +2364,8 @@ class GameScreen:
 # ─────────────────────────────────────────
 #  AUTO-UPDATER
 # ─────────────────────────────────────────
-CURRENT_VERSION = "1.9.1"   # обновляй при каждом релизе / update on each release
-GITHUB_REPO = "Gios1q/Chess-of-Evil"   # ваш репозиторий
+CURRENT_VERSION = "1.9.9"   # обновляй при каждом релизе / update on each release
+GITHUB_REPO = "1GioiG1/Chess-of-Evil"   # ваш репозиторий
 
 import urllib.request as _urllib_req
 import subprocess as _subprocess
